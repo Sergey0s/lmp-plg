@@ -1,19 +1,8 @@
-/*!
- * Lampa: плагин «Продолжить смотреть» (Continue Watch).
+/*
  * Кнопка «Продолжить» на карточке фильма/сериала, восстановление позиции,
  * фоновый prefetch торрента, окно буферизации.
  * © 2026 · Sergey0s · github.com/Sergey0s
  *
- * Главные принципы:
- *   - ES5-only (совместимость со старыми WebView Smart-TV);
- *   - все Lampa.* вызовы под safe()/try-catch;
- *   - все listener-ы вешаются после Lampa app:ready;
- *   - O(1) поиск по сериалу через title-index;
- *   - debounced write в Storage (2с), throttle Timeline-апдейтов (2с);
- *   - lazy логгер (timestamp строится только при DEBUG=true);
- *   - кнопка вставляется первой в .full-start__buttons и явно фокусируется
- *     через collectionSet/collectionFocus (после refresh контроллера).
- */
 (function () {
     'use strict';
 
