@@ -3,6 +3,7 @@
  * фоновый prefetch торрента, окно буферизации.
  * © 2026 · Sergey0s · github.com/Sergey0s
  *
+ */
 (function () {
     'use strict';
 
