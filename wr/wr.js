@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.1.4';
+    var PLUGIN_VERSION = '2.1.5';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -288,15 +288,43 @@
         return true;
     }
 
-    function getJackettBase() {
-        var url = String(Lampa.Storage.get('jackett_url', '') || '').trim().replace(/\/+$/, '');
+    function normalizeJackettUrl(raw) {
+        var url = String(raw || '').trim().replace(/\/+$/, '');
         if (!url) return '';
         if (!/^https?:\/\//i.test(url)) url = 'http://' + url;
         return url.replace('jacred.xyz', 'jac.red');
     }
 
-    function getJackettKey() {
-        return String(Lampa.Storage.get('jackett_key', '') || '');
+    function hostFromUrl(url) {
+        return String(url || '')
+            .replace(/^https?:\/\//i, '')
+            .replace(/\/.*$/, '')
+            .toLowerCase();
+    }
+
+    function getJackettConfigs() {
+        var list = [
+            {
+                base: normalizeJackettUrl(Lampa.Storage.get('jackett_url', '')),
+                key: String(Lampa.Storage.get('jackett_key', '') || '')
+            },
+            {
+                base: normalizeJackettUrl(Lampa.Storage.get('jackett_url_two', '')),
+                key: String(Lampa.Storage.get('jackett_key_two', '') || '')
+            }
+        ];
+
+        var out = [];
+        var seen = {};
+        for (var i = 0; i < list.length; i++) {
+            var it = list[i];
+            if (!it.base) continue;
+            if (seen[it.base]) continue;
+            seen[it.base] = true;
+            it.host = hostFromUrl(it.base);
+            out.push(it);
+        }
+        return out;
     }
 
     function normalizeJacRedItem(item) {
@@ -316,29 +344,70 @@
     var JACRED_CACHE_TTL = 5 * 60 * 1000;
     var jacRedCache = {};
 
-    function searchJacRed(query, callback, errorCallback) {
-        var base = getJackettBase();
-        if (!base) return errorCallback('jackett_url не задан в Lampa');
-
-        var cacheKey = base + '|' + query;
+    function searchJacRedSingle(config, query, callback, errorCallback) {
+        var cacheKey = config.base + '|' + query;
         var cached = jacRedCache[cacheKey];
         if (cached && (Date.now() - cached.ts) < JACRED_CACHE_TTL) {
-            return callback(cached.data.slice());
+            return callback(cached.data.slice(), { host: config.host, cached: true });
         }
 
-        var url = base + '/api/v1.0/torrents?search=' + encodeURIComponent(query) +
-            '&apikey=' + encodeURIComponent(getJackettKey() || 'null');
+        var url = config.base + '/api/v1.0/torrents?search=' + encodeURIComponent(query) +
+            '&apikey=' + encodeURIComponent(config.key || 'null');
 
         var network = new Lampa.Reguest();
         network.timeout(20000);
         network.silent(url, function (data) {
-            if (!Array.isArray(data)) return errorCallback('JacRed: ответ не массив');
+            if (!Array.isArray(data)) return errorCallback('JacRed(' + config.host + '): ответ не массив');
             var normalized = data.map(normalizeJacRedItem);
             jacRedCache[cacheKey] = { data: normalized, ts: Date.now() };
-            callback(normalized.slice());
+            callback(normalized.slice(), { host: config.host, cached: false });
         }, function (xhr) {
-            errorCallback('JacRed недоступен (' + (xhr && xhr.status ? xhr.status : 'нет ответа') + ')');
+            errorCallback('JacRed(' + config.host + ') недоступен (' + (xhr && xhr.status ? xhr.status : 'нет ответа') + ')');
         });
+    }
+
+    function searchJacRed(query, callback, errorCallback) {
+        var configs = getJackettConfigs();
+        if (!configs.length) return errorCallback('jackett_url не задан в Lampa');
+
+        var pending = configs.length;
+        var all = [];
+        var seen = {};
+        var sourceStats = [];
+        var hasSuccess = false;
+        var firstError = null;
+
+        function mergeRows(rows) {
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i];
+                var key = r.MagnetUri || r.Link || (r.Title + '|' + (r.Size || ''));
+                if (!seen[key]) {
+                    seen[key] = true;
+                    all.push(r);
+                }
+            }
+        }
+
+        function done() {
+            if (--pending > 0) return;
+            if (!hasSuccess) return errorCallback(firstError || 'JacRed недоступен');
+            callback(all, { sources: sourceStats });
+        }
+
+        for (var i = 0; i < configs.length; i++) {
+            (function (cfg) {
+                searchJacRedSingle(cfg, query, function (rows) {
+                    hasSuccess = true;
+                    sourceStats.push({ host: cfg.host, count: rows.length, ok: true });
+                    mergeRows(rows || []);
+                    done();
+                }, function (err) {
+                    firstError = firstError || err;
+                    sourceStats.push({ host: cfg.host, count: 0, ok: false, error: err });
+                    done();
+                });
+            })(configs[i]);
+        }
     }
 
     var FEED_QUERIES = null;
@@ -428,11 +497,20 @@
         var pending = queriesToTry.length;
         var anySuccess = false;
         var firstError = null;
+        var sourceMap = {};
 
         queriesToTry.forEach(function (q) {
-            searchJacRed(q, function (results) {
+            searchJacRed(q, function (results, meta) {
                 anySuccess = true;
                 pushResults(results);
+                if (meta && meta.sources) {
+                    for (var i = 0; i < meta.sources.length; i++) {
+                        var s = meta.sources[i];
+                        if (!sourceMap[s.host]) sourceMap[s.host] = { host: s.host, count: 0, ok: false };
+                        sourceMap[s.host].count += (s.count || 0);
+                        sourceMap[s.host].ok = sourceMap[s.host].ok || !!s.ok;
+                    }
+                }
                 if (--pending === 0) finish();
             }, function (err) {
                 searchLampaParser(q, function (results) {
@@ -460,7 +538,9 @@
             if (!anySuccess && !allResults.length) {
                 return errorCallback(firstError || 'Не удалось получить результаты');
             }
-            callback(allResults);
+            var sources = [];
+            for (var k in sourceMap) sources.push(sourceMap[k]);
+            callback(allResults, { sources: sources });
         }
     }
 
@@ -822,13 +902,19 @@
             var sectionHeader = $('<div class="wrestling-weekly__section">🔥 Свежие раздачи · последние ' + FEED_DAYS + ' дней <span class="wrestling-weekly__section-count"></span></div>');
             sectionHeader.on('mouseenter mouseover focus', clearScreenBackdrop);
             scroll.append(sectionHeader);
+            var feedActions = $('<div class="wrestling-weekly__filters"></div>');
+            var refreshFeedBtn = $('<div class="selector wrestling-weekly__filter-btn">🔄 Обновить ленту</div>');
+            feedActions.append(refreshFeedBtn);
+            trackFocus(refreshFeedBtn, { clearBackdrop: true });
+            scroll.append(feedActions);
             var feedContainer = $('<div class="wrestling-weekly__list wrestling-weekly__feed"></div>');
             var feedLoader = $('<div class="wrestling-weekly__loader">Загружаю свежие раздачи...</div>');
             feedContainer.append(feedLoader);
             scroll.append(feedContainer);
 
-            loadRecentFeed(function (results) {
-                feedLoader.remove();
+            var feedNonce = 0;
+            function renderFeed(results) {
+                feedContainer.empty();
                 if (!results.length) {
                     feedContainer.append($('<div class="empty"><div class="empty__title">За ' + FEED_DAYS + ' дней свежих раздач не нашлось</div></div>'));
                     sectionHeader.find('.wrestling-weekly__section-count').text('· 0');
@@ -836,7 +922,6 @@
                 }
 
                 sectionHeader.find('.wrestling-weekly__section-count').text('· найдено ' + results.length);
-
                 var feedEvt = { kind: 'feed', title: 'Свежая раздача' };
                 var frag = document.createDocumentFragment();
                 for (var i = 0; i < results.length; i++) {
@@ -845,9 +930,26 @@
                     frag.appendChild(row[0]);
                 }
                 feedContainer[0].appendChild(frag);
-
                 refreshController(250);
-            });
+            }
+
+            function runFeedSearch(forceRefresh) {
+                var nonce = ++feedNonce;
+                if (forceRefresh) {
+                    jacRedCache = {};
+                    if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Лента: кэш очищен, обновляю…');
+                }
+                feedContainer.empty();
+                feedContainer.append(feedLoader);
+                sectionHeader.find('.wrestling-weekly__section-count').text('· обновляю…');
+                loadRecentFeed(function (results) {
+                    if (nonce !== feedNonce) return;
+                    renderFeed(results);
+                });
+            }
+
+            refreshFeedBtn.on('hover:enter', function () { runFeedSearch(true); });
+            runFeedSearch(false);
         }
 
         function buildModeEvent(event) {
@@ -880,6 +982,7 @@
             var daysBtn = $('<div class="selector wrestling-weekly__filter-btn"></div>');
             var sortBtn = $('<div class="selector wrestling-weekly__filter-btn"></div>');
             var queryBtn = null;
+            var refreshBtn = $('<div class="selector wrestling-weekly__filter-btn">🔄 Обновить</div>');
 
             function refreshLabels() {
                 daysBtn.html('<span class="wrestling-weekly__filter-label">Период:</span> ' + labelForDays(state.freshDays));
@@ -887,7 +990,7 @@
             }
             refreshLabels();
 
-            filterRow.append(daysBtn).append(sortBtn);
+            filterRow.append(daysBtn).append(sortBtn).append(refreshBtn);
 
             if (event.kind === 'custom') {
                 queryBtn = $('<div class="selector wrestling-weekly__filter-btn"></div>');
@@ -897,6 +1000,7 @@
 
             trackFocus(daysBtn, { clearBackdrop: true });
             trackFocus(sortBtn, { clearBackdrop: true });
+            trackFocus(refreshBtn, { clearBackdrop: true });
             if (queryBtn) trackFocus(queryBtn, { clearBackdrop: true });
 
             scroll.append(filterRow);
@@ -910,6 +1014,8 @@
             scroll.append(loader);
 
             var rawCache = null;
+            var sourceStats = null;
+            var searchNonce = 0;
 
             var RENDER_LIMIT = 200;
 
@@ -918,6 +1024,15 @@
                 var filtered = filterEventResults(rawCache, event, state);
 
                 var statsHtml = 'Найдено по фильтру: <b>' + filtered.length + '</b> · всего от парсера: <b>' + rawCache.length + '</b>';
+                if (sourceStats && sourceStats.length) {
+                    sourceStats.sort(function (a, b) { return (b.count || 0) - (a.count || 0); });
+                    var parts = [];
+                    for (var si = 0; si < sourceStats.length; si++) {
+                        var src = sourceStats[si];
+                        parts.push(src.host + ' <b>' + (src.count || 0) + '</b>');
+                    }
+                    statsHtml += ' · Источник: ' + parts.join(' · ');
+                }
                 if (filtered.length > RENDER_LIMIT) {
                     statsHtml += ' · показано первые <b>' + RENDER_LIMIT + '</b> (сузьте фильтр)';
                 }
@@ -986,14 +1101,31 @@
                 });
             }
 
-            searchTorrents(event, function (raw) {
-                loader.remove();
-                rawCache = raw;
-                rerender();
-            }, function (err) {
-                loader.remove();
-                listContainer.append($('<div class="empty"><div class="empty__title">' + err + '</div></div>'));
-            });
+            function runSearch(forceRefresh) {
+                var nonce = ++searchNonce;
+                if (forceRefresh) {
+                    jacRedCache = {};
+                    if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Кэш очищен, обновляю…');
+                }
+                loader.show();
+                stats.html('Обновляю выдачу…');
+                listContainer.empty();
+                searchTorrents(event, function (raw, meta) {
+                    if (nonce !== searchNonce) return;
+                    loader.hide();
+                    rawCache = raw;
+                    sourceStats = (meta && meta.sources) ? meta.sources.slice() : null;
+                    rerender();
+                }, function (err) {
+                    if (nonce !== searchNonce) return;
+                    loader.hide();
+                    listContainer.empty();
+                    listContainer.append($('<div class="empty"><div class="empty__title">' + err + '</div></div>'));
+                });
+            }
+
+            refreshBtn.on('hover:enter', function () { runSearch(true); });
+            runSearch(false);
         }
 
         function buildResultRow(result, event) {
