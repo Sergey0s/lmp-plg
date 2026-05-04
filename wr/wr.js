@@ -603,7 +603,7 @@
                 var d = matches[f]._effectiveDate;
                 if (d && d.getTime() >= cutoff) fresh.push(matches[f]);
             }
-            if (fresh.length) pool = fresh;
+            pool = fresh;
         }
 
         var sortBy = state.sortBy;
@@ -1041,6 +1041,10 @@
                 listContainer.empty();
 
                 var listToShow = filtered;
+                if (!filtered.length && state.freshDays > 0) {
+                    listContainer.append($('<div class="empty"><div class="empty__title">За выбранный период совпадений нет</div></div>'));
+                    return;
+                }
                 if (!filtered.length) {
                     listContainer.append($('<div class="empty"><div class="empty__title">Точных совпадений нет. Показываю все результаты парсера:</div></div>'));
                     listToShow = rawCache.slice().sort(function (a, b) { return (b.Seeders || 0) - (a.Seeders || 0); });
