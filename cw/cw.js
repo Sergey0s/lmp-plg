@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '100';
+    var PLUGIN_VERSION = '101';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -1338,6 +1338,17 @@
                 var road = e.data && e.data.road;
                 if (!hash || !road || typeof road.percent === 'undefined') return;
 
+                // Хеш в обновлении — это активная серия в плеере. Если он
+                // отличается от того, что у нас зафиксировано как «текущая
+                // играющая серия», значит плеер переключился (авто-next /
+                // ручной next-episode). Сбрасываем старый hash в storage
+                // и проставляем свежий timestamp новой серии.
+                if (S.last_player_hash !== hash) {
+                    if (S.last_player_hash) flushHashFromTimeline(S.last_player_hash);
+                    S.last_player_hash = hash;
+                    touchEntryTimestamp(hash);
+                }
+
                 var now = Date.now();
                 if (now - S.last_tick < TIMELINE_THROTTLE_MS) return;
                 S.last_tick = now;
@@ -1377,6 +1388,21 @@
         safe('flushPendingWrites', function () { Lampa.Storage.set(activeKey(), S.mem); });
     }
 
+    // Принудительно обновить timestamp у записи. Нужно когда плеер автоматически
+    // переключается на следующую серию: её file_name/season/episode уже лежат в
+    // storage (их положил префетч/loadEpisodesPlaylist), поэтому updateEntry
+    // считает её «не изменившейся» и timestamp остаётся старым. В то же время
+    // flushHashFromTimeline предыдущей серии записывает свежий timestamp →
+    // findStreamParams возвращает старую серию и smart-next выводит на кнопку
+    // «Следующая SxxEyy». touchEntryTimestamp пробивает эту проблему.
+    function touchEntryTimestamp(hash) {
+        if (!hash) return;
+        var p = readParams();
+        if (!p[hash]) return;
+        p[hash].timestamp = Date.now();
+        writeParams(p, true);
+    }
+
     function attachPlayerListeners() {
         detachPlayerListeners();
         LISTENERS.player_start = function (d) {
@@ -1400,6 +1426,7 @@
             if (mLink) patch.torrent_link = mLink[1];
             if (mIdx) patch.file_index = parseInt(mIdx[1]);
             updateEntry(hash, patch);
+            touchEntryTimestamp(hash);
         };
         LISTENERS.player_destroy = function () {
             if (S.last_player_hash) {
@@ -1408,11 +1435,31 @@
             }
             flushPendingWrites();
             detachPlayerListeners();
+            scheduleCardButtonRefresh();
         };
         safe('Player.listener', function () {
             Lampa.Player.listener.follow('start', LISTENERS.player_start);
             Lampa.Player.listener.follow('destroy', LISTENERS.player_destroy);
         });
+    }
+
+    // Когда плеер закрывается, мы должны перерисовать кнопку «Продолжить» на
+    // карточке — иначе она остаётся со старыми данными (старая серия / время).
+    // Lampa не вызывает full:complite повторно, поэтому делаем это вручную.
+    // setTimeout даём, чтобы Lampa успела вернуть active activity на карточку.
+    function scheduleCardButtonRefresh() {
+        setTimeout(function () {
+            safe('refreshOnDestroy', function () {
+                var act = Lampa.Activity.active && Lampa.Activity.active();
+                if (!act) return;
+                var movie = act.movie || (act.activity && act.activity.movie);
+                var render = (act.render && act.render()) || (act.activity && act.activity.render && act.activity.render());
+                if (!movie || !render) return;
+                var oldBtn = render.find('.button--continue-watch').first();
+                if (oldBtn.length) oldBtn.remove();
+                _runInject(movie, render, { skipPrefetch: true });
+            });
+        }, 120);
     }
 
     function detachPlayerListeners() {
@@ -1608,14 +1655,12 @@
         if (!opts.skipPrefetch) prefetchTorrent(movie, params);
 
         var percent = 0, timeStr = '';
-        if (!target.isNext) {
-            var hash = generateHash(movie, params.season, params.episode);
-            var view = safe('Timeline.view', function () { return Lampa.Timeline.view(hash); });
-            if (view && view.percent > 0) { percent = view.percent; timeStr = formatTime(view.time); }
-            else if (params.time) { percent = params.percent || 0; timeStr = formatTime(params.time); }
-        }
+        var hash = generateHash(movie, params.season, params.episode);
+        var view = safe('Timeline.view', function () { return Lampa.Timeline.view(hash); });
+        if (view && view.percent > 0) { percent = view.percent; timeStr = formatTime(view.time); }
+        else if (params.time) { percent = params.percent || 0; timeStr = formatTime(params.time); }
 
-        var label = target.isNext ? 'Следующая' : 'Продолжить';
+        var label = 'Продолжить';
         if (params.season && params.episode) label += ' S' + params.season + ' E' + params.episode;
         if (timeStr) label += ' <span class="cw-btn__time">(' + timeStr + ')</span>';
 
