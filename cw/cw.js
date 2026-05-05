@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '98';
+    var PLUGIN_VERSION = '100';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -78,7 +78,9 @@
         last_full_title: null,
         last_play_url: null,
         last_lookup: null,
-        last_tick: 0
+        last_tick: 0,
+        last_player_hash: null,
+        files_pending: {}
     };
 
     var TIMERS = { save: 0, click: 0 };
@@ -266,6 +268,7 @@
 
         var changed = false;
         for (var k in data) {
+            if (data[k] === undefined) continue;
             if (params[hash][k] !== data[k]) {
                 params[hash][k] = data[k];
                 changed = true;
@@ -809,6 +812,29 @@
         if (S.prefetch_xhr) { try { S.prefetch_xhr.abort(); } catch (e) {} S.prefetch_xhr = null; }
     }
 
+    // Заранее тянем file_stats у TorrServer'а, чтобы при клике «Продолжить»
+    // плейлист эпизодов был готов синхронно. Иначе Lampa.Player.play получает
+    // короткий [current] плейлист и автоматический next-episode не работает —
+    // плеер просто закрывается на конце текущего файла.
+    function prefetchFilesList(torrentLink, hash) {
+        if (!hash || !torrentLink) return;
+        if (S.files[torrentLink] || S.files_pending[torrentLink]) return;
+        if (!Lampa.Torserver || !Lampa.Torserver.files) return;
+        S.files_pending[torrentLink] = true;
+        safe('Torserver.files.prefetch', function () {
+            Lampa.Torserver.files(hash, function (json) {
+                delete S.files_pending[torrentLink];
+                if (json && json.file_stats && json.file_stats.length) {
+                    S.files[torrentLink] = json.file_stats;
+                    log('files prefetched: ' + json.file_stats.length + ' for ' + torrentLink.slice(0, 60));
+                    setTimeout(function () { delete S.files[torrentLink]; }, 600000);
+                }
+            }, function () {
+                delete S.files_pending[torrentLink];
+            });
+        });
+    }
+
     function prefetchTorrent(movie, params) {
         if (!prefetchEnabled()) return;
         if (!params || !params.torrent_link || !params.file_name) return;
@@ -852,6 +878,8 @@
             log('prefetch: hash=' + hash.slice(0, 16) + '…');
 
             S.prefetch_xhr = triggerPreload(url, PREFETCH_TIMEOUT_MS);
+
+            if (movie.number_of_seasons) prefetchFilesList(params.torrent_link, hash);
 
             var poll = function () {
                 if (S.prefetch_link !== params.torrent_link) { stopPrefetchPoll(); return; }
@@ -966,7 +994,11 @@
                     Lampa.Controller.collectionSet(modal);
                     Lampa.Controller.collectionFocus(false, modal);
                 },
-                back: cancel
+                left:  function () { try { if (Navigator.canmove('left'))  Navigator.move('left');  } catch (e) {} },
+                right: function () { try { if (Navigator.canmove('right')) Navigator.move('right'); } catch (e) {} },
+                up:    function () { try { if (Navigator.canmove('up'))    Navigator.move('up');    } catch (e) {} },
+                down:  function () { try { if (Navigator.canmove('down'))  Navigator.move('down');  } catch (e) {} },
+                back:  cancel
             });
             Lampa.Controller.toggle('cw_buffer_modal');
         });
@@ -1089,10 +1121,18 @@
     // =========================================================================
     // 9. Запуск плеера по нажатию «Продолжить»
     // =========================================================================
+    // ВАЖНО: data.playlist должен содержать ВСЕ эпизоды СРАЗУ. Lampa.Player
+    // авто-переключает на следующий итем плейлиста, но «горячая» подмена
+    // плейлиста через Lampa.Player.playlist(...) после старта игнорируется
+    // плеером — поэтому если изначально передать [current] + stub, плеер на
+    // конце эпизода видит stub без url и закрывается. Поэтому собираем полный
+    // плейлист до Lampa.Player.play.
     function startPlayback(movie, params, url, timeline) {
         var player_type = Lampa.Storage.field('player_torrent');
         var force_inner = (player_type === 'inner');
-        log('startPlayback player_type=' + player_type + ' position=' + (timeline.time || -1));
+        var isSeries = !!(movie.number_of_seasons && params.season && params.episode);
+        log('startPlayback player_type=' + player_type + ' position=' + (timeline.time || -1) +
+            ' series=' + isSeries);
 
         var data = {
             url: url,
@@ -1113,26 +1153,94 @@
 
         var epTitle = params.episode_title ||
             (params.season ? ('S' + params.season + ' E' + params.episode) : (movie.title || params.title || ''));
-        data.playlist = [{
+
+        var fallbackPlaylist = [{
             url: url, title: epTitle, timeline: timeline,
             season: params.season, episode: params.episode,
             card: movie, torrent_hash: params.torrent_link
         }];
-        if (movie.number_of_seasons) data.playlist.push({ title: 'Загрузка...', url: '', timeline: {} });
 
-        if (timeline.time > 0) noty('Восстанавливаем: ' + formatTime(timeline.time));
-        Lampa.Player.play(data);
-        attachPlayerListeners();
-        try { Lampa.Player.callback(function () { Lampa.Controller.toggle('content'); }); } catch (e) {}
+        var doPlay = function (playlist) {
+            data.playlist = (playlist && playlist.length) ? playlist : fallbackPlaylist;
+            if (timeline.time > 0) noty('Восстанавливаем: ' + formatTime(timeline.time));
+            Lampa.Player.play(data);
+            attachPlayerListeners();
+            try { Lampa.Player.callback(function () { Lampa.Controller.toggle('content'); }); } catch (e) {}
+            log('player started, playlist=' + data.playlist.length + ' items');
+        };
 
-        if (movie.number_of_seasons && params.season && params.episode) {
-            loadEpisodesPlaylist(movie, params, url, function (playlist) {
-                if (playlist.length > 1) {
-                    safe('Player.playlist', function () { Lampa.Player.playlist(playlist); });
+        if (!isSeries) { doPlay(fallbackPlaylist); return; }
+
+        if (S.files[params.torrent_link]) {
+            log('using cached files for playlist (' + S.files[params.torrent_link].length + ')');
+            buildPlaylistFromFiles(movie, params, url, S.files[params.torrent_link], doPlay);
+            return;
+        }
+
+        var played = false;
+        var startTimeout = setTimeout(function () {
+            if (played) return;
+            played = true;
+            warn('playlist load timeout, starting with current episode only');
+            doPlay(fallbackPlaylist);
+        }, 3500);
+
+        loadEpisodesPlaylist(movie, params, url, function (playlist) {
+            if (played) {
+                if (playlist && playlist.length > 1) {
+                    safe('Player.playlist.late', function () { Lampa.Player.playlist(playlist); });
                     noty('Плейлист загружен (' + playlist.length + ' эп.)');
                 }
+                return;
+            }
+            played = true;
+            clearTimeout(startTimeout);
+            doPlay(playlist && playlist.length ? playlist : fallbackPlaylist);
+        });
+    }
+
+    function buildPlaylistFromFiles(movie, currentParams, currentUrl, files, done) {
+        var title = pickTitle(movie);
+        var playlist = [];
+        var allParams = readParams();
+
+        for (var i = 0; i < files.length; i++) {
+            var file = files[i];
+            safe('parseFile', function () {
+                var info = Lampa.Torserver.parse({
+                    movie: movie, files: [file],
+                    filename: file.path.split('/').pop(),
+                    path: file.path, is_file: true
+                });
+                if (movie.number_of_seasons && info.season !== currentParams.season) return;
+
+                var epHash = generateHash(movie, info.season, info.episode);
+                var tl = Lampa.Timeline.view(epHash) || { hash: epHash, percent: 0, time: 0, duration: 0 };
+                if (!allParams[epHash]) {
+                    updateEntry(epHash, {
+                        file_name: file.path,
+                        torrent_link: currentParams.torrent_link,
+                        file_index: file.id || 0,
+                        title: title,
+                        season: info.season, episode: info.episode,
+                        percent: 0, time: 0, duration: 0
+                    });
+                }
+
+                var isCur = (info.season === currentParams.season && info.episode === currentParams.episode);
+                playlist.push({
+                    title: movie.number_of_seasons ? ('S' + info.season + ' E' + info.episode) : (movie.title || title),
+                    season: info.season, episode: info.episode,
+                    timeline: tl, torrent_hash: currentParams.torrent_link, card: movie,
+                    url: isCur ? currentUrl :
+                        buildStreamUrl({ file_name: file.path, torrent_link: currentParams.torrent_link, file_index: file.id || 0 }),
+                    position: isCur ? (tl.time || -1) : -1
+                });
             });
         }
+
+        if (movie.number_of_seasons) playlist.sort(function (a, b) { return a.episode - b.episode; });
+        done(playlist);
     }
 
     function launchPlayer(movie, params, opts) {
@@ -1141,23 +1249,25 @@
         if (!url) return;
 
         var hash = generateHash(movie, params.season, params.episode);
+        var existingEntry = readParams()[hash] || {};
+        var existingDuration = existingEntry.duration || params.duration || 0;
         var timeline;
         if (opts.startFresh) {
-            timeline = { hash: hash, time: 0, percent: 0, duration: params.duration || 0 };
+            timeline = { hash: hash, time: 0, percent: 0, duration: existingDuration };
+            updateEntry(hash, { percent: 0, time: 0 });
         } else {
             timeline = Lampa.Timeline.view(hash);
             if (!timeline || (!timeline.time && !timeline.percent)) {
                 timeline = timeline || { hash: hash };
                 timeline.time = params.time || 0;
                 timeline.percent = params.percent || 0;
-                timeline.duration = params.duration || 0;
+                timeline.duration = existingDuration;
             } else if (params.time > timeline.time) {
                 timeline.time = params.time;
                 timeline.percent = params.percent;
             }
+            updateEntry(hash, { percent: timeline.percent, time: timeline.time, duration: timeline.duration });
         }
-
-        updateEntry(hash, { percent: timeline.percent, time: timeline.time, duration: timeline.duration });
 
         var go = function () { startPlayback(movie, params, url, timeline); };
 
@@ -1240,6 +1350,33 @@
         });
     }
 
+    // Снять текущее состояние эпизода с Lampa.Timeline и записать в наш storage.
+    // Вызывается на смене эпизода и на закрытии плеера, чтобы не потерять
+    // финальные percent/time (наш Timeline.update-листенер throttle'ится 2с
+    // и может пропустить последние тики).
+    function flushHashFromTimeline(hash) {
+        if (!hash) return;
+        safe('flushHashFromTimeline', function () {
+            var tl = Lampa.Timeline.view(hash);
+            if (!tl) return;
+            var pct = (typeof tl.percent === 'number') ? tl.percent : 0;
+            var t = tl.time || 0;
+            var dur = tl.duration || 0;
+            if (!pct && !t && !dur) return;
+            var p = readParams();
+            if (!p[hash]) return;
+            updateEntry(hash, { percent: pct, time: t, duration: dur });
+        });
+    }
+
+    function flushPendingWrites() {
+        if (!TIMERS.save) return;
+        clearTimeout(TIMERS.save);
+        TIMERS.save = 0;
+        if (!S.mem) return;
+        safe('flushPendingWrites', function () { Lampa.Storage.set(activeKey(), S.mem); });
+    }
+
     function attachPlayerListeners() {
         detachPlayerListeners();
         LISTENERS.player_start = function (d) {
@@ -1247,13 +1384,31 @@
             var hash = generateHash(d.card, d.season, d.episode);
             var mFile = d.url && d.url.match(/\/stream\/([^?]+)/);
             if (!mFile) return;
-            updateEntry(hash, {
+
+            if (S.last_player_hash && S.last_player_hash !== hash) {
+                flushHashFromTimeline(S.last_player_hash);
+            }
+            S.last_player_hash = hash;
+
+            var mLink = d.url && d.url.match(/[?&]link=([^&]+)/);
+            var mIdx = d.url && d.url.match(/[?&]index=(\d+)/);
+            var patch = {
                 file_name: decodeURIComponent(mFile[1]),
                 title: pickTitle(d.card),
                 season: d.season, episode: d.episode
-            });
+            };
+            if (mLink) patch.torrent_link = mLink[1];
+            if (mIdx) patch.file_index = parseInt(mIdx[1]);
+            updateEntry(hash, patch);
         };
-        LISTENERS.player_destroy = function () { detachPlayerListeners(); };
+        LISTENERS.player_destroy = function () {
+            if (S.last_player_hash) {
+                flushHashFromTimeline(S.last_player_hash);
+                S.last_player_hash = null;
+            }
+            flushPendingWrites();
+            detachPlayerListeners();
+        };
         safe('Player.listener', function () {
             Lampa.Player.listener.follow('start', LISTENERS.player_start);
             Lampa.Player.listener.follow('destroy', LISTENERS.player_destroy);
@@ -1301,11 +1456,20 @@
 
         if (isSeries) {
             var nxt = target.isNext ? null : findNextEpisodeParams(movie, current);
-            if (nxt) items.push({
+            if (nxt && (nxt.season !== current.season || nxt.episode !== current.episode)) items.push({
                 title: 'Завершить и запустить следующий: S' + nxt.season + ' E' + nxt.episode,
                 action: function () {
-                    markWatched(curHash, current);
-                    launchPlayer(movie, nxt);
+                    var freshCurrent = findEpisodeParams(movie, current.season, current.episode) || current;
+                    var freshNxt = findNextEpisodeParams(movie, freshCurrent);
+                    if (!freshNxt || (freshNxt.season === freshCurrent.season && freshNxt.episode === freshCurrent.episode)) {
+                        warn('next episode disappeared, falling back to closure nxt');
+                        freshNxt = nxt;
+                    }
+                    log('next-action: cur S' + freshCurrent.season + 'E' + freshCurrent.episode +
+                        ' -> nxt S' + freshNxt.season + 'E' + freshNxt.episode +
+                        ' file=' + (freshNxt.file_name || '?').slice(-40));
+                    markWatched(curHash, freshCurrent);
+                    launchPlayer(movie, cloneFresh(freshNxt), { startFresh: true });
                 }
             });
             var prev = findPrevEpisodeParams(movie, current);
