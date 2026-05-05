@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.1.5';
+    var PLUGIN_VERSION = '2.1.6';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -328,17 +328,66 @@
     }
 
     function normalizeJacRedItem(item) {
+        var magnet = item.magnet || '';
         return {
             Title: item.title || item.name || '',
             Tracker: item.trackerName || item.tracker || '',
             Size: item.size || 0,
-            MagnetUri: item.magnet || '',
+            MagnetUri: magnet,
             Link: item.url || '',
             Seeders: parseInt(item.sid || 0, 10) || 0,
             Peers: parseInt(item.pir || 0, 10) || 0,
             PublishDate: item.createTime || item.publishDate || null,
-            hash: ''
+            hash: magnetToHash(magnet)
         };
+    }
+
+    // Извлекаем infohash из magnet локально, чтобы не гонять лишний запрос
+    // в TorrServer. Поддерживаем 40-char hex (v1) и 32-char base32, плюс
+    // случаи URL-encoded magnet и v2 (btmh).
+    function magnetToHash(magnet) {
+        if (!magnet) return '';
+        var s = String(magnet);
+        var variants = [s];
+        try { variants.push(decodeURIComponent(s)); } catch (e) {}
+        try { variants.push(decodeURIComponent(decodeURIComponent(s))); } catch (e) {}
+        for (var i = 0; i < variants.length; i++) {
+            var v = variants[i];
+            var hex = v.match(/[?&]xt=urn:bt[im]h:([a-fA-F0-9]{40})/i) ||
+                      v.match(/urn:bt[im]h:([a-fA-F0-9]{40})/i);
+            if (hex) return hex[1].toLowerCase();
+            var b32 = v.match(/[?&]xt=urn:bt[im]h:([a-zA-Z2-7]{32})/i) ||
+                      v.match(/urn:bt[im]h:([a-zA-Z2-7]{32})/i);
+            if (b32) {
+                var h = base32ToHex(b32[1].toUpperCase());
+                if (h) return h;
+            }
+        }
+        return '';
+    }
+
+    function base32ToHex(str) {
+        var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+        var bits = '';
+        for (var i = 0; i < str.length; i++) {
+            var v = alphabet.indexOf(str.charAt(i));
+            if (v < 0) return '';
+            var b = v.toString(2);
+            while (b.length < 5) b = '0' + b;
+            bits += b;
+        }
+        var hex = '';
+        for (var j = 0; j + 4 <= bits.length; j += 4) {
+            hex += parseInt(bits.substr(j, 4), 2).toString(16);
+        }
+        return hex.toLowerCase().slice(0, 40);
+    }
+
+    function wrLog() {
+        if (!window.console || !console.log) return;
+        var args = Array.prototype.slice.call(arguments);
+        args.unshift('[WR]');
+        try { console.log.apply(console, args); } catch (e) {}
     }
 
     var JACRED_CACHE_TTL = 5 * 60 * 1000;
@@ -619,27 +668,69 @@
     }
 
     function playTorrent(result, event) {
-        if (Lampa.Torrent && typeof Lampa.Torrent.start === 'function') {
-            try {
-                Lampa.Torrent.start(result, { title: result.Title || event.title });
-                return;
-            } catch (e) {
-                Lampa.Noty.show('Ошибка запуска торрента: ' + (e && e.message ? e.message : e));
-            }
-        }
-
         var magnet = result.MagnetUri || result.Link;
         if (!magnet) return Lampa.Noty.show('Нет magnet/torrent ссылки');
 
-        if (Lampa.Player && typeof Lampa.Player.play === 'function') {
-            Lampa.Player.play({
-                title: result.Title,
-                url: magnet,
-                torrent_hash: result.hash || ''
-            });
-        } else {
-            Lampa.Noty.show('TorrServer / Player недоступны');
+        if (!result.hash) result.hash = magnetToHash(magnet);
+
+        var seeders = +result.Seeders || 0;
+        var sizeGb = ((result.Size || 0) / 1073741824).toFixed(2);
+        var preloadMode = '';
+        try { preloadMode = String(Lampa.Storage.field('torrserver_preload')); } catch (e) {}
+
+        wrLog('play "' + (result.Title || '').slice(0, 80) + '"',
+            'seeders=' + seeders, 'peers=' + (result.Peers || 0),
+            'size=' + sizeGb + 'GB',
+            'hash=' + (result.hash ? result.hash.slice(0, 16) + '…' : 'нет'),
+            'tracker=' + (result.Tracker || '—'),
+            'preload_mode=' + preloadMode);
+
+        if (seeders > 0 && seeders < 5) {
+            Lampa.Noty.show('Внимание: только ' + seeders + ' сидов — буфер может проседать');
+        } else if (seeders === 0) {
+            Lampa.Noty.show('У раздачи 0 сидов — воспроизведение скорее всего сорвётся');
         }
+
+        attachOneShotPlayerLog();
+
+        if (!Lampa.Torrent || typeof Lampa.Torrent.start !== 'function') {
+            Lampa.Noty.show('Lampa.Torrent.start недоступен — обнови Lampa');
+            wrLog('Lampa.Torrent.start unavailable');
+            return;
+        }
+
+        try {
+            Lampa.Torrent.start(result, { title: result.Title || (event && event.title) });
+        } catch (e) {
+            wrLog('Torrent.start threw:', e && e.message);
+            Lampa.Noty.show('Ошибка запуска: ' + (e && e.message ? e.message : e));
+        }
+    }
+
+    // Один раз ловим Player.start чтобы залогировать реальный URL, который
+    // Lampa передаёт в плеер (Vimm на Android), и убедиться что в URL стоит
+    // &play. Это нужно для диагностики проблем с буфером.
+    function attachOneShotPlayerLog() {
+        if (!Lampa.Player || !Lampa.Player.listener) return;
+        var fired = false;
+        var listener = function (d) {
+            if (fired) return;
+            fired = true;
+            var url = (d && d.url) || '';
+            var flag = url.indexOf('&play') >= 0 ? 'play' :
+                       url.indexOf('&preload') >= 0 ? 'preload' : 'нет';
+            wrLog('player start',
+                'url_flag=' + flag,
+                'has_card=' + !!(d && d.card),
+                'has_torrent_hash=' + !!(d && d.torrent_hash),
+                'url=' + url.slice(0, 220));
+            try { Lampa.Player.listener.remove('start', listener); } catch (e) {}
+        };
+        try { Lampa.Player.listener.follow('start', listener); } catch (e) {}
+        setTimeout(function () {
+            if (fired) return;
+            try { Lampa.Player.listener.remove('start', listener); } catch (e) {}
+        }, 90000);
     }
 
     function ensureScreenBackdropLayer() {
