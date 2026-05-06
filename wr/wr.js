@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.1.6';
+    var PLUGIN_VERSION = '2.1.7';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -391,7 +391,71 @@
     }
 
     var JACRED_CACHE_TTL = 5 * 60 * 1000;
+    var JACRED_CACHE_MAX = 40;
     var jacRedCache = {};
+    var activeRequests = [];
+    var activePlayerLog = null;
+    var cleanupCount = 0;
+    var lastCleanupReason = '';
+
+    function removeActiveRequest(network) {
+        for (var i = activeRequests.length - 1; i >= 0; i--) {
+            if (activeRequests[i] === network) activeRequests.splice(i, 1);
+        }
+    }
+
+    function pruneJacRedCache() {
+        var now = Date.now();
+        var keys = Object.keys(jacRedCache);
+        var keep = [];
+        for (var i = 0; i < keys.length; i++) {
+            var item = jacRedCache[keys[i]];
+            if (item && (now - item.ts) < JACRED_CACHE_TTL) keep.push(keys[i]);
+            else delete jacRedCache[keys[i]];
+        }
+        if (keep.length <= JACRED_CACHE_MAX) return;
+        keep.sort(function (a, b) {
+            return (jacRedCache[a].ts || 0) - (jacRedCache[b].ts || 0);
+        });
+        while (keep.length > JACRED_CACHE_MAX) {
+            delete jacRedCache[keep.shift()];
+        }
+    }
+
+    function memorySnapshot() {
+        var m = (window.performance && performance.memory) ? performance.memory : null;
+        if (!m) return null;
+        return {
+            used: m.usedJSHeapSize || 0,
+            total: m.totalJSHeapSize || 0,
+            limit: m.jsHeapSizeLimit || 0
+        };
+    }
+
+    function cleanupPlayerLog() {
+        if (!activePlayerLog) return;
+        try {
+            if (Lampa.Player && Lampa.Player.listener && activePlayerLog.listener) {
+                Lampa.Player.listener.remove('start', activePlayerLog.listener);
+            }
+        } catch (e) {}
+        if (activePlayerLog.timer) clearTimeout(activePlayerLog.timer);
+        activePlayerLog = null;
+    }
+
+    function cleanupRuntime(reason) {
+        cleanupPlayerLog();
+        pruneJacRedCache();
+        for (var i = activeRequests.length - 1; i >= 0; i--) {
+            try {
+                if (activeRequests[i] && typeof activeRequests[i].clear === 'function') activeRequests[i].clear();
+            } catch (e) {}
+        }
+        activeRequests = [];
+        cleanupCount++;
+        lastCleanupReason = reason || 'manual';
+        wrLog('cleanup', lastCleanupReason, 'cache=' + Object.keys(jacRedCache).length, 'mem=', memorySnapshot());
+    }
 
     function searchJacRedSingle(config, query, callback, errorCallback) {
         var cacheKey = config.base + '|' + query;
@@ -404,13 +468,17 @@
             '&apikey=' + encodeURIComponent(config.key || 'null');
 
         var network = new Lampa.Reguest();
+        activeRequests.push(network);
         network.timeout(20000);
         network.silent(url, function (data) {
+            removeActiveRequest(network);
             if (!Array.isArray(data)) return errorCallback('JacRed(' + config.host + '): ответ не массив');
             var normalized = data.map(normalizeJacRedItem);
             jacRedCache[cacheKey] = { data: normalized, ts: Date.now() };
+            pruneJacRedCache();
             callback(normalized.slice(), { host: config.host, cached: false });
         }, function (xhr) {
+            removeActiveRequest(network);
             errorCallback('JacRed(' + config.host + ') недоступен (' + (xhr && xhr.status ? xhr.status : 'нет ответа') + ')');
         });
     }
@@ -712,10 +780,13 @@
     // &play. Это нужно для диагностики проблем с буфером.
     function attachOneShotPlayerLog() {
         if (!Lampa.Player || !Lampa.Player.listener) return;
+        cleanupPlayerLog();
         var fired = false;
         var listener = function (d) {
             if (fired) return;
             fired = true;
+            if (activePlayerLog && activePlayerLog.timer) clearTimeout(activePlayerLog.timer);
+            activePlayerLog = null;
             var url = (d && d.url) || '';
             var flag = url.indexOf('&play') >= 0 ? 'play' :
                        url.indexOf('&preload') >= 0 ? 'preload' : 'нет';
@@ -727,10 +798,14 @@
             try { Lampa.Player.listener.remove('start', listener); } catch (e) {}
         };
         try { Lampa.Player.listener.follow('start', listener); } catch (e) {}
-        setTimeout(function () {
+        activePlayerLog = {
+            listener: listener,
+            timer: setTimeout(function () {
             if (fired) return;
             try { Lampa.Player.listener.remove('start', listener); } catch (e) {}
-        }, 90000);
+            activePlayerLog = null;
+            }, 90000)
+        };
     }
 
     function ensureScreenBackdropLayer() {
@@ -1335,6 +1410,8 @@
         };
 
         addStyles();
+        attachLifecycleCleanup();
+        exposeDebugApi();
 
         if (window.appready) {
             addMenuButton();
@@ -1343,6 +1420,36 @@
                 if (e.type === 'ready') addMenuButton();
             });
         }
+    }
+
+    function attachLifecycleCleanup() {
+        try {
+            window.addEventListener('pagehide', function () { cleanupRuntime('pagehide'); });
+            document.addEventListener('visibilitychange', function () {
+                if (document.hidden) cleanupRuntime('hidden');
+            });
+        } catch (e) {}
+    }
+
+    function exposeDebugApi() {
+        window.wr = {
+            version: PLUGIN_VERSION,
+            cleanup: function () {
+                cleanupRuntime('manual');
+                return window.wr.state();
+            },
+            state: function () {
+                return {
+                    version: PLUGIN_VERSION,
+                    cache_keys: Object.keys(jacRedCache).length,
+                    active_requests: activeRequests.length,
+                    active_player_log: !!activePlayerLog,
+                    cleanups: cleanupCount,
+                    last_cleanup_reason: lastCleanupReason,
+                    memory: memorySnapshot()
+                };
+            }
+        };
     }
 
     if (window.Lampa && window.Lampa.Component) {
