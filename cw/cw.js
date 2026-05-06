@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '101';
+    var PLUGIN_VERSION = '103';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -384,6 +384,53 @@
         return findEpisodeParams(movie, current.season + 1, 1);
     }
 
+    function fileToEpisodeParams(movie, current, file) {
+        if (!movie || !current || !file || !current.torrent_link) return null;
+        var title = pickTitle(movie);
+        var info = null;
+        safe('parseNextFile', function () {
+            info = Lampa.Torserver.parse({
+                movie: movie, files: [file],
+                filename: file.path.split('/').pop(),
+                path: file.path, is_file: true
+            });
+        });
+        if (!info || !info.season || !info.episode) return null;
+        if (movie.number_of_seasons &&
+            info.season !== current.season &&
+            !(info.season === current.season + 1 && info.episode === 1)) return null;
+        return {
+            file_name: file.path,
+            torrent_link: current.torrent_link,
+            file_index: file.id || 0,
+            title: title,
+            season: info.season,
+            episode: info.episode,
+            percent: 0,
+            time: 0,
+            duration: 0,
+            synthetic_next: true
+        };
+    }
+
+    function findNextEpisodeFromFiles(movie, current) {
+        if (!current || !current.torrent_link) return null;
+        var files = S.files[current.torrent_link];
+        if (!files || !files.length) return null;
+
+        var targetSeason = current.season;
+        var targetEpisode = current.episode + 1;
+        var fallback = null;
+
+        for (var i = 0; i < files.length; i++) {
+            var p = fileToEpisodeParams(movie, current, files[i]);
+            if (!p) continue;
+            if (p.season === targetSeason && p.episode === targetEpisode) return p;
+            if (!fallback && p.season === current.season + 1 && p.episode === 1) fallback = p;
+        }
+        return fallback;
+    }
+
     function findPrevEpisodeParams(movie, current) {
         if (!current || !current.season || !current.episode) return null;
         if (current.episode > 1) {
@@ -419,9 +466,16 @@
         var isSeries = !!(movie.number_of_seasons && current.season && current.episode);
 
         if (pct >= SMART_NEXT_PCT) {
-            if (!isSeries) return null;
-            var next = findNextEpisodeParams(movie, current);
-            if (!next) return null;
+            if (!isSeries) {
+                if (S.last_lookup) S.last_lookup.reason = 'movie watched >= ' + SMART_NEXT_PCT + '%';
+                return null;
+            }
+            var next = findNextEpisodeParams(movie, current) || findNextEpisodeFromFiles(movie, current);
+            if (!next) {
+                if (S.last_lookup) S.last_lookup.reason = 'next episode not in history, showing current';
+                return { params: current, isNext: false };
+            }
+            if (next.synthetic_next && S.last_lookup) S.last_lookup.reason = 'next episode from torrent files';
             return { params: next, isNext: true, fromEpisode: { season: current.season, episode: current.episode } };
         }
         return { params: current, isNext: false };
@@ -816,7 +870,21 @@
     // плейлист эпизодов был готов синхронно. Иначе Lampa.Player.play получает
     // короткий [current] плейлист и автоматический next-episode не работает —
     // плеер просто закрывается на конце текущего файла.
-    function prefetchFilesList(torrentLink, hash) {
+    function refreshActiveCardIfMatches(movie) {
+        safe('refreshActiveCardIfMatches', function () {
+            var act = Lampa.Activity.active && Lampa.Activity.active();
+            if (!act) return;
+            var activeMovie = act.movie || (act.activity && act.activity.movie);
+            var render = (act.render && act.render()) || (act.activity && act.activity.render && act.activity.render());
+            if (!activeMovie || !render) return;
+            if (pickTitle(activeMovie) !== pickTitle(movie)) return;
+            var oldBtn = render.find('.button--continue-watch').first();
+            if (oldBtn.length) oldBtn.remove();
+            _runInject(activeMovie, render, { skipPrefetch: true });
+        });
+    }
+
+    function prefetchFilesList(torrentLink, hash, movie, params) {
         if (!hash || !torrentLink) return;
         if (S.files[torrentLink] || S.files_pending[torrentLink]) return;
         if (!Lampa.Torserver || !Lampa.Torserver.files) return;
@@ -827,6 +895,9 @@
                 if (json && json.file_stats && json.file_stats.length) {
                     S.files[torrentLink] = json.file_stats;
                     log('files prefetched: ' + json.file_stats.length + ' for ' + torrentLink.slice(0, 60));
+                    if (movie && params && params.percent >= SMART_NEXT_PCT && findNextEpisodeFromFiles(movie, params)) {
+                        refreshActiveCardIfMatches(movie);
+                    }
                     setTimeout(function () { delete S.files[torrentLink]; }, 600000);
                 }
             }, function () {
@@ -879,7 +950,7 @@
 
             S.prefetch_xhr = triggerPreload(url, PREFETCH_TIMEOUT_MS);
 
-            if (movie.number_of_seasons) prefetchFilesList(params.torrent_link, hash);
+            if (movie.number_of_seasons) prefetchFilesList(params.torrent_link, hash, movie, params);
 
             var poll = function () {
                 if (S.prefetch_link !== params.torrent_link) { stopPrefetchPoll(); return; }
@@ -1502,12 +1573,12 @@
         var ep = isSeries ? ('S' + current.season + ' E' + current.episode) : '';
 
         if (isSeries) {
-            var nxt = target.isNext ? null : findNextEpisodeParams(movie, current);
+            var nxt = target.isNext ? null : (findNextEpisodeParams(movie, current) || findNextEpisodeFromFiles(movie, current));
             if (nxt && (nxt.season !== current.season || nxt.episode !== current.episode)) items.push({
                 title: 'Завершить и запустить следующий: S' + nxt.season + ' E' + nxt.episode,
                 action: function () {
                     var freshCurrent = findEpisodeParams(movie, current.season, current.episode) || current;
-                    var freshNxt = findNextEpisodeParams(movie, freshCurrent);
+                    var freshNxt = findNextEpisodeParams(movie, freshCurrent) || findNextEpisodeFromFiles(movie, freshCurrent);
                     if (!freshNxt || (freshNxt.season === freshCurrent.season && freshNxt.episode === freshCurrent.episode)) {
                         warn('next episode disappeared, falling back to closure nxt');
                         freshNxt = nxt;
@@ -1831,7 +1902,8 @@
             body.append(row('Последний поиск',
                 S.last_lookup.kind + ' · "' + S.last_lookup.title + '" · ' +
                 (S.last_lookup.found ? '<span style="color:#7c7">найдено</span>' : '<span style="color:#f66">не найдено</span>') +
-                ' · keys=' + S.last_lookup.total));
+                ' · keys=' + S.last_lookup.total +
+                (S.last_lookup.reason ? ' · ' + S.last_lookup.reason : '')));
         }
         body.append(row('Debug log', DEBUG ? 'включён · cw.debug(false) чтобы выключить' : 'выключен · cw.debug(true) чтобы включить'));
         body.append(row('Окно буферизации',
