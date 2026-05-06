@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '103';
+    var PLUGIN_VERSION = '106';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -37,6 +37,7 @@
     var PREFETCH_TARGET_DEF = 5;
     var PREFETCH_POLL_MS    = 1500;
     var PREFETCH_TIMEOUT_MS = 120000;
+    var ECO_MODE_KEY        = 'cw_eco_mode';
 
     var SMART_NEXT_PCT     = 92;
     var TIMELINE_STORE_KEY = 'file_view';
@@ -80,7 +81,12 @@
         last_lookup: null,
         last_tick: 0,
         last_player_hash: null,
-        files_pending: {}
+        last_player_card: null,
+        files_pending: {},
+        cleanup_count: 0,
+        last_cleanup_at: 0,
+        last_cleanup_reason: '',
+        buffer_close: null
     };
 
     var TIMERS = { save: 0, click: 0 };
@@ -866,6 +872,50 @@
         if (S.prefetch_xhr) { try { S.prefetch_xhr.abort(); } catch (e) {} S.prefetch_xhr = null; }
     }
 
+    function ecoModeEnabled() { return getBoolPref(ECO_MODE_KEY, true); }
+
+    function memorySnapshot() {
+        var m = (window.performance && performance.memory) ? performance.memory : null;
+        if (!m) return null;
+        return {
+            used: m.usedJSHeapSize || 0,
+            total: m.totalJSHeapSize || 0,
+            limit: m.jsHeapSizeLimit || 0
+        };
+    }
+
+    function cleanupRuntime(reason) {
+        stopPrefetchPoll();
+        S.files = {};
+        S.files_pending = {};
+        S.last_prefetched_link = null;
+        S.prefetch_link = null;
+        S.prefetch_hash = null;
+        S.prefetch_pct = 0;
+        S.prefetch_speed = 0;
+        S.prefetch_target_reached = false;
+        if (S.buffer_close) {
+            safe('buffer.close.cleanup', function () { S.buffer_close(); });
+            S.buffer_close = null;
+        }
+        S.cleanup_count++;
+        S.last_cleanup_at = Date.now();
+        S.last_cleanup_reason = reason || 'manual';
+        log('runtime cleanup: ' + S.last_cleanup_reason);
+    }
+
+    function attachLifecycleCleanup() {
+        var cleanupIfEco = function (reason) {
+            if (ecoModeEnabled()) cleanupRuntime(reason);
+        };
+        safe('lifecycle.cleanup', function () {
+            window.addEventListener('pagehide', function () { cleanupIfEco('pagehide'); });
+            document.addEventListener('visibilitychange', function () {
+                if (document.hidden) cleanupIfEco('hidden');
+            });
+        });
+    }
+
     // Заранее тянем file_stats у TorrServer'а, чтобы при клике «Продолжить»
     // плейлист эпизодов был готов синхронно. Иначе Lampa.Player.play получает
     // короткий [current] плейлист и автоматический next-episode не работает —
@@ -1035,6 +1085,7 @@
             aborted = true;
             if (pollIv) { clearInterval(pollIv); pollIv = 0; }
             modal.remove();
+            if (S.buffer_close === close) S.buffer_close = null;
             safe('Controller.toggle', function () {
                 Lampa.Controller.toggle(prevController || 'content');
             });
@@ -1057,6 +1108,7 @@
         modal.find('.cw-buf__btn--cancel').on('hover:enter', cancel);
 
         document.body.appendChild(modal[0]);
+        S.buffer_close = close;
 
         safe('Controller.add', function () {
             Lampa.Controller.add('cw_buffer_modal', {
@@ -1486,6 +1538,7 @@
                 flushHashFromTimeline(S.last_player_hash);
             }
             S.last_player_hash = hash;
+            S.last_player_card = d.card;
 
             var mLink = d.url && d.url.match(/[?&]link=([^&]+)/);
             var mIdx = d.url && d.url.match(/[?&]index=(\d+)/);
@@ -1500,13 +1553,15 @@
             touchEntryTimestamp(hash);
         };
         LISTENERS.player_destroy = function () {
+            var playedCard = S.last_player_card;
             if (S.last_player_hash) {
                 flushHashFromTimeline(S.last_player_hash);
                 S.last_player_hash = null;
             }
+            S.last_player_card = null;
             flushPendingWrites();
             detachPlayerListeners();
-            scheduleCardButtonRefresh();
+            scheduleCardButtonRefresh(playedCard);
         };
         safe('Player.listener', function () {
             Lampa.Player.listener.follow('start', LISTENERS.player_start);
@@ -1518,19 +1573,31 @@
     // карточке — иначе она остаётся со старыми данными (старая серия / время).
     // Lampa не вызывает full:complite повторно, поэтому делаем это вручную.
     // setTimeout даём, чтобы Lampa успела вернуть active activity на карточку.
-    function scheduleCardButtonRefresh() {
-        setTimeout(function () {
-            safe('refreshOnDestroy', function () {
-                var act = Lampa.Activity.active && Lampa.Activity.active();
-                if (!act) return;
-                var movie = act.movie || (act.activity && act.activity.movie);
-                var render = (act.render && act.render()) || (act.activity && act.activity.render && act.activity.render());
-                if (!movie || !render) return;
-                var oldBtn = render.find('.button--continue-watch').first();
-                if (oldBtn.length) oldBtn.remove();
-                _runInject(movie, render, { skipPrefetch: true });
-            });
-        }, 120);
+    // На Android TV WebView карточка иногда дорисовывается ещё 0.5-1.5с после
+    // закрытия внешнего плеера, поэтому одной попытки недостаточно: старый DOM
+    // может вернуться поверх нашей кнопки. Делаем несколько дешёвых повторов.
+    function scheduleCardButtonRefresh(playedCard) {
+        var expectedTitle = pickTitle(playedCard);
+        var delays = [250, 800, 1600];
+
+        for (var i = 0; i < delays.length; i++) {
+            (function (delay) {
+                setTimeout(function () {
+                    safe('refreshOnDestroy', function () {
+                        var act = Lampa.Activity.active && Lampa.Activity.active();
+                        if (!act) return;
+                        var movie = act.movie || (act.activity && act.activity.movie);
+                        var render = (act.render && act.render()) || (act.activity && act.activity.render && act.activity.render());
+                        if (!movie || !render) return;
+                        if (expectedTitle && pickTitle(movie) !== expectedTitle) return;
+                        var oldBtn = render.find('.button--continue-watch').first();
+                        if (oldBtn.length) oldBtn.remove();
+                        _runInject(movie, render, { skipPrefetch: true });
+                        log('card refresh after player destroy: delay=' + delay + ' title="' + pickTitle(movie) + '"');
+                    });
+                }, delay);
+            })(delays[i]);
+        }
     }
 
     function detachPlayerListeners() {
@@ -1923,6 +1990,19 @@
             prefetchStatus +
             ' · <span style="opacity:.6">cw.prefetch(true|false, %)</span>'));
 
+        var mem = memorySnapshot();
+        body.append(row('Eco cleanup',
+            (ecoModeEnabled() ? '<span style="color:#7c7">ВКЛ</span>' : '<span style="color:#f66">ВЫКЛ</span>') +
+            ' · cleanups: <b>' + S.cleanup_count + '</b>' +
+            (S.last_cleanup_at ? ' · ' + S.last_cleanup_reason + ' · ' + new Date(S.last_cleanup_at).toLocaleTimeString() : '') +
+            ' · files cache: <b>' + Object.keys(S.files).length + '</b>' +
+            ' · pending: <b>' + Object.keys(S.files_pending).length + '</b>' +
+            ' · active poll: <b>' + (S.prefetch_poll_iv ? 'yes' : 'no') + '</b>' +
+            ' · <span style="opacity:.6">cw.eco(true|false), cw.cleanup()</span>'));
+        body.append(row('JS heap',
+            mem ? (fmtBytes(mem.used) + ' / ' + fmtBytes(mem.total) + ' · limit ' + fmtBytes(mem.limit)) :
+                '<span style="opacity:.6">performance.memory недоступен в этом WebView</span>'));
+
         body.append(row('Smart next-episode', 'порог: <b>' + SMART_NEXT_PCT + '%</b> · long-press на «Продолжить» — контекстное меню'));
         body.append(row('TorrServer add', 'magnet → infohash на клиенте + GET /stream?preload (simple CORS, без preflight); перед add в модалке — GET /echo health-check'));
 
@@ -2092,6 +2172,22 @@
                     last_link: S.last_prefetched_link
                 };
             },
+            eco: function (enabled) {
+                if (typeof enabled !== 'undefined') Lampa.Storage.set(ECO_MODE_KEY, !!enabled);
+                console.log('[CW] eco cleanup:', ecoModeEnabled() ? 'ON' : 'OFF');
+                return { enabled: ecoModeEnabled(), cleanups: S.cleanup_count, last_reason: S.last_cleanup_reason };
+            },
+            cleanup: function (reason) {
+                cleanupRuntime(reason || 'manual');
+                console.log('[CW] runtime cleanup done:', S.last_cleanup_reason);
+                return {
+                    cleanups: S.cleanup_count,
+                    files_cache: Object.keys(S.files).length,
+                    pending: Object.keys(S.files_pending).length,
+                    active_poll: !!S.prefetch_poll_iv,
+                    memory: memorySnapshot()
+                };
+            },
             inject: function () {
                 var act = Lampa.Activity.active();
                 var movie = act && act.movie;
@@ -2124,6 +2220,7 @@
 
         ensureSync();
         attachStorageListener();
+        attachLifecycleCleanup();
         patchPlayer();
         attachFullListener();
         attachTimelineListener();
