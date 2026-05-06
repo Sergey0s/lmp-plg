@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '106';
+    var PLUGIN_VERSION = '107';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -82,6 +82,8 @@
         last_tick: 0,
         last_player_hash: null,
         last_player_card: null,
+        last_launched_card: null,
+        last_launched_at: 0,
         files_pending: {},
         cleanup_count: 0,
         last_cleanup_at: 0,
@@ -904,14 +906,23 @@
         log('runtime cleanup: ' + S.last_cleanup_reason);
     }
 
+    function scheduleReturnRefresh(reason) {
+        if (!S.last_launched_card) return;
+        if (Date.now() - S.last_launched_at > 10 * 60 * 1000) return;
+        log('schedule return refresh: ' + (reason || 'unknown'));
+        scheduleCardButtonRefresh(S.last_launched_card);
+    }
+
     function attachLifecycleCleanup() {
         var cleanupIfEco = function (reason) {
             if (ecoModeEnabled()) cleanupRuntime(reason);
         };
         safe('lifecycle.cleanup', function () {
             window.addEventListener('pagehide', function () { cleanupIfEco('pagehide'); });
+            window.addEventListener('focus', function () { scheduleReturnRefresh('window.focus'); });
             document.addEventListener('visibilitychange', function () {
                 if (document.hidden) cleanupIfEco('hidden');
+                else scheduleReturnRefresh('visible');
             });
         });
     }
@@ -1370,6 +1381,9 @@
         opts = opts || {};
         var url = buildStreamUrl(params);
         if (!url) return;
+
+        S.last_launched_card = movie;
+        S.last_launched_at = Date.now();
 
         var hash = generateHash(movie, params.season, params.episode);
         var existingEntry = readParams()[hash] || {};
