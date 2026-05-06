@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.1.7';
+    var PLUGIN_VERSION = '2.1.8';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -128,6 +128,8 @@
 
     var FEED_DAYS = 14;
     var FEED_LIMIT = 60;
+    var FEED_SEARCH_CONCURRENCY = 3;
+    var EVENT_QUERY_CONCURRENCY = 2;
     var WRESTLING_FEED_KEYWORDS = [
         'wwe', 'aew', 'tna', 'impact wrestling', 'njpw', 'roh', 'ring of honor',
         'all elite wrestling', 'world wrestling entertainment',
@@ -136,6 +138,7 @@
         'bkfc', 'bare knuckle fighting championship', 'bare knuckle'
     ];
     var FEED_KEYWORDS_NORM = null;
+    var FEED_TITLE_MATCH_RE = null;
 
     var FEED_EXTRA_QUERIES = [
         'WWE NXT', 'WWE Main Event', 'WWE PPV', 'AEW PPV', 'TNA PPV',
@@ -212,6 +215,10 @@
     var NORMALIZE_RE = /[._\-\[\](){}!?,'"`~+=:;\/\\|<>@#$%^&*]+/g;
     var WHITESPACE_RE = /\s+/g;
 
+    function escapeRegExp(s) {
+        return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
     function normalizeText(s) {
         return (s || '')
             .toLowerCase()
@@ -276,7 +283,9 @@
 
     var TOKEN_RE_CACHE = {};
     function tokenRegex(token) {
-        if (!TOKEN_RE_CACHE[token]) TOKEN_RE_CACHE[token] = new RegExp('(^| )' + token + '( |$)');
+        if (!TOKEN_RE_CACHE[token]) {
+            TOKEN_RE_CACHE[token] = new RegExp('(^| )' + escapeRegExp(token) + '( |$)');
+        }
         return TOKEN_RE_CACHE[token];
     }
 
@@ -342,6 +351,30 @@
         };
     }
 
+    var B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    var B32_VAL = (function () {
+        var o = {};
+        for (var bi = 0; bi < B32_ALPHABET.length; bi++) o[B32_ALPHABET.charAt(bi)] = bi;
+        return o;
+    }());
+
+    function base32ToHex(str) {
+        var bitsParts = [];
+        for (var i = 0; i < str.length; i++) {
+            var v = B32_VAL[str.charAt(i)];
+            if (v === undefined) return '';
+            var b = v.toString(2);
+            while (b.length < 5) b = '0' + b;
+            bitsParts.push(b);
+        }
+        var bits = bitsParts.join('');
+        var hex = '';
+        for (var j = 0; j + 4 <= bits.length; j += 4) {
+            hex += parseInt(bits.substr(j, 4), 2).toString(16);
+        }
+        return hex.toLowerCase().slice(0, 40);
+    }
+
     // Извлекаем infohash из magnet локально, чтобы не гонять лишний запрос
     // в TorrServer. Поддерживаем 40-char hex (v1) и 32-char base32, плюс
     // случаи URL-encoded magnet и v2 (btmh).
@@ -364,23 +397,6 @@
             }
         }
         return '';
-    }
-
-    function base32ToHex(str) {
-        var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-        var bits = '';
-        for (var i = 0; i < str.length; i++) {
-            var v = alphabet.indexOf(str.charAt(i));
-            if (v < 0) return '';
-            var b = v.toString(2);
-            while (b.length < 5) b = '0' + b;
-            bits += b;
-        }
-        var hex = '';
-        for (var j = 0; j + 4 <= bits.length; j += 4) {
-            hex += parseInt(bits.substr(j, 4), 2).toString(16);
-        }
-        return hex.toLowerCase().slice(0, 40);
     }
 
     function wrLog() {
@@ -540,52 +556,63 @@
         return list;
     }
 
-    function loadRecentFeed(callback) {
-        if (!FEED_KEYWORDS_NORM) {
-            FEED_KEYWORDS_NORM = WRESTLING_FEED_KEYWORDS.concat(PPV_KEYWORDS).map(normalizeText);
+    function ensureFeedKeywordsNorm() {
+        if (FEED_KEYWORDS_NORM) return;
+        FEED_KEYWORDS_NORM = WRESTLING_FEED_KEYWORDS.concat(PPV_KEYWORDS).map(normalizeText);
+        var parts = [];
+        for (var fi = 0; fi < FEED_KEYWORDS_NORM.length; fi++) {
+            if (!FEED_KEYWORDS_NORM[fi]) continue;
+            parts.push(escapeRegExp(FEED_KEYWORDS_NORM[fi]));
         }
+        FEED_TITLE_MATCH_RE = parts.length ? new RegExp(parts.join('|')) : null;
+    }
+
+    function loadRecentFeed(callback, opts) {
+        opts = opts || {};
+        var isCancelled = typeof opts.isCancelled === 'function' ? opts.isCancelled : function () { return false; };
+        var concurrency = typeof opts.concurrency === 'number' && opts.concurrency > 0
+            ? opts.concurrency : FEED_SEARCH_CONCURRENCY;
+
+        ensureFeedKeywordsNorm();
         var queries = buildFeedQueries();
-        var pending = queries.length;
+        var total = queries.length;
         var allResults = [];
         var seen = {};
+        var nextIx = 0;
+        var inflight = 0;
+        var finished = 0;
 
-        queries.forEach(function (q) {
-            searchJacRed(q, function (results) {
-                results.forEach(function (r) {
-                    var key = r.MagnetUri || r.Link || r.Title;
-                    if (!seen[key]) {
-                        seen[key] = true;
-                        allResults.push(r);
-                    }
-                });
-                if (--pending === 0) finish();
-            }, function () {
-                if (--pending === 0) finish();
-            });
-        });
+        function mergeResults(results) {
+            if (isCancelled()) return;
+            for (var ri = 0; ri < results.length; ri++) {
+                var r = results[ri];
+                var key = r.MagnetUri || r.Link || r.Title;
+                if (!seen[key]) {
+                    seen[key] = true;
+                    allResults.push(r);
+                }
+            }
+        }
 
-        function finish() {
-            var feedKws = FEED_KEYWORDS_NORM;
+        function applyFinish() {
+            if (isCancelled()) return;
+            var titleRe = FEED_TITLE_MATCH_RE;
             var nowMs = Date.now();
             var cutoff = nowMs - FEED_DAYS * 24 * 60 * 60 * 1000;
             var futureLimit = nowMs + 24 * 60 * 60 * 1000;
 
             var matches = [];
             for (var i = 0; i < allResults.length; i++) {
-                var r = allResults[i];
-                var tNorm = titleNorm(r);
-                var isWrestling = false;
-                for (var k = 0; k < feedKws.length; k++) {
-                    if (feedKws[k] && tNorm.indexOf(feedKws[k]) !== -1) { isWrestling = true; break; }
-                }
-                if (!isWrestling) continue;
+                var row = allResults[i];
+                var tNorm = titleNorm(row);
+                if (!(titleRe && titleRe.test(tNorm))) continue;
 
-                var d = ensureEffectiveDate(r);
+                var d = ensureEffectiveDate(row);
                 if (!d) continue;
                 var ms = d.getTime();
                 if (ms > futureLimit || ms < cutoff) continue;
 
-                matches.push(r);
+                matches.push(row);
             }
 
             matches.sort(function (a, b) {
@@ -594,6 +621,37 @@
 
             callback(matches.slice(0, FEED_LIMIT));
         }
+
+        function onQueryDone() {
+            finished++;
+            if (finished >= total) applyFinish();
+            else kick();
+        }
+
+        function runOne(q) {
+            searchJacRed(q, function (results) {
+                mergeResults(results || []);
+                inflight--;
+                onQueryDone();
+            }, function () {
+                inflight--;
+                onQueryDone();
+            });
+        }
+
+        function kick() {
+            if (isCancelled()) return;
+            while (inflight < concurrency && nextIx < total) {
+                inflight++;
+                runOne(queries[nextIx++]);
+            }
+        }
+
+        if (!total) {
+            if (!isCancelled()) callback([]);
+            return;
+        }
+        kick();
     }
 
     function searchLampaParser(query, callback, errorCallback) {
@@ -609,46 +667,35 @@
 
     function searchTorrents(event, callback, errorCallback) {
         var queriesToTry = event.queries.slice();
+        var total = queriesToTry.length;
         var allResults = [];
         var seen = {};
-        var pending = queriesToTry.length;
         var anySuccess = false;
         var firstError = null;
         var sourceMap = {};
-
-        queriesToTry.forEach(function (q) {
-            searchJacRed(q, function (results, meta) {
-                anySuccess = true;
-                pushResults(results);
-                if (meta && meta.sources) {
-                    for (var i = 0; i < meta.sources.length; i++) {
-                        var s = meta.sources[i];
-                        if (!sourceMap[s.host]) sourceMap[s.host] = { host: s.host, count: 0, ok: false };
-                        sourceMap[s.host].count += (s.count || 0);
-                        sourceMap[s.host].ok = sourceMap[s.host].ok || !!s.ok;
-                    }
-                }
-                if (--pending === 0) finish();
-            }, function (err) {
-                searchLampaParser(q, function (results) {
-                    anySuccess = true;
-                    pushResults(results);
-                    if (--pending === 0) finish();
-                }, function (err2) {
-                    firstError = firstError || err2 || err;
-                    if (--pending === 0) finish();
-                });
-            });
-        });
+        var nextIx = 0;
+        var inflight = 0;
+        var finished = 0;
 
         function pushResults(results) {
-            results.forEach(function (r) {
+            for (var pi = 0; pi < results.length; pi++) {
+                var r = results[pi];
                 var key = r.MagnetUri || r.Link || (r.Title + '|' + (r.Size || ''));
                 if (!seen[key]) {
                     seen[key] = true;
                     allResults.push(r);
                 }
-            });
+            }
+        }
+
+        function mergeMeta(meta) {
+            if (!meta || !meta.sources) return;
+            for (var i = 0; i < meta.sources.length; i++) {
+                var s = meta.sources[i];
+                if (!sourceMap[s.host]) sourceMap[s.host] = { host: s.host, count: 0, ok: false };
+                sourceMap[s.host].count += (s.count || 0);
+                sourceMap[s.host].ok = sourceMap[s.host].ok || !!s.ok;
+            }
         }
 
         function finish() {
@@ -659,6 +706,45 @@
             for (var k in sourceMap) sources.push(sourceMap[k]);
             callback(allResults, { sources: sources });
         }
+
+        function onQueryDone() {
+            finished++;
+            if (finished >= total) finish();
+            else kick();
+        }
+
+        function runQuery(q) {
+            searchJacRed(q, function (results, meta) {
+                anySuccess = true;
+                pushResults(results || []);
+                mergeMeta(meta);
+                inflight--;
+                onQueryDone();
+            }, function (err) {
+                searchLampaParser(q, function (results) {
+                    anySuccess = true;
+                    pushResults(results || []);
+                    inflight--;
+                    onQueryDone();
+                }, function (err2) {
+                    firstError = firstError || err2 || err;
+                    inflight--;
+                    onQueryDone();
+                });
+            });
+        }
+
+        function kick() {
+            while (inflight < EVENT_QUERY_CONCURRENCY && nextIx < total) {
+                inflight++;
+                runQuery(queriesToTry[nextIx++]);
+            }
+        }
+
+        if (!total) {
+            return errorCallback('Нет поисковых запросов');
+        }
+        kick();
     }
 
     function precomputeEventKeywords(event) {
@@ -666,6 +752,12 @@
         if (event.ppvKeywords && event.ppvKeywords.length) {
             event._includeKwNorm = event.ppvKeywords.map(normalizeText);
             event._excludeKwNorm = (event.excludeKeywords || []).map(normalizeText);
+            var escParts = [];
+            for (var ii = 0; ii < event._includeKwNorm.length; ii++) {
+                if (!event._includeKwNorm[ii]) continue;
+                escParts.push(escapeRegExp(event._includeKwNorm[ii]));
+            }
+            event._includeKwRe = escParts.length ? new RegExp(escParts.join('|')) : null;
         }
         if (event.queries && event.queries.length) {
             event._queryTokenSets = event.queries.map(tokenize);
@@ -681,17 +773,13 @@
 
         var matches;
         if (event._includeKwNorm) {
-            var incl = event._includeKwNorm;
+            var inclRe = event._includeKwRe;
             var excl = event._excludeKwNorm;
             matches = [];
             for (var j = 0; j < results.length; j++) {
                 var r = results[j];
                 var t = titleNorm(r);
-                var ok = false;
-                for (var ki = 0; ki < incl.length; ki++) {
-                    if (incl[ki] && t.indexOf(incl[ki]) !== -1) { ok = true; break; }
-                }
-                if (!ok) continue;
+                if (!(inclRe && inclRe.test(t))) continue;
                 var bad = false;
                 for (var ke = 0; ke < excl.length; ke++) {
                     if (excl[ke] && tokenRegex(excl[ke]).test(t)) { bad = true; break; }
@@ -801,9 +889,9 @@
         activePlayerLog = {
             listener: listener,
             timer: setTimeout(function () {
-            if (fired) return;
-            try { Lampa.Player.listener.remove('start', listener); } catch (e) {}
-            activePlayerLog = null;
+                if (fired) return;
+                try { Lampa.Player.listener.remove('start', listener); } catch (e) {}
+                activePlayerLog = null;
             }, 90000)
         };
     }
@@ -927,6 +1015,7 @@
         var info = $('<div class="wrestling-weekly__info"></div>');
         var loader = $('<div class="wrestling-weekly__loader">Поиск раздач...</div>');
         var lastFocus = null;
+        var componentDestroyed = false;
 
         var self = this;
 
@@ -1011,6 +1100,7 @@
         this.stop  = function () { clearScreenBackdrop(); };
 
         this.destroy = function () {
+            componentDestroyed = true;
             if (Lampa.Parser && typeof Lampa.Parser.clear === 'function') Lampa.Parser.clear();
             clearScreenBackdrop();
             scroll.destroy();
@@ -1109,8 +1199,12 @@
                 feedContainer.append(feedLoader);
                 sectionHeader.find('.wrestling-weekly__section-count').text('· обновляю…');
                 loadRecentFeed(function (results) {
-                    if (nonce !== feedNonce) return;
+                    if (nonce !== feedNonce || componentDestroyed) return;
                     renderFeed(results);
+                }, {
+                    isCancelled: function () {
+                        return nonce !== feedNonce || componentDestroyed;
+                    }
                 });
             }
 
@@ -1281,13 +1375,13 @@
                 stats.html('Обновляю выдачу…');
                 listContainer.empty();
                 searchTorrents(event, function (raw, meta) {
-                    if (nonce !== searchNonce) return;
+                    if (nonce !== searchNonce || componentDestroyed) return;
                     loader.hide();
                     rawCache = raw;
                     sourceStats = (meta && meta.sources) ? meta.sources.slice() : null;
                     rerender();
                 }, function (err) {
-                    if (nonce !== searchNonce) return;
+                    if (nonce !== searchNonce || componentDestroyed) return;
                     loader.hide();
                     listContainer.empty();
                     listContainer.append($('<div class="empty"><div class="empty__title">' + err + '</div></div>'));
