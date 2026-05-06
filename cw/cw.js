@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '107';
+    var PLUGIN_VERSION = '109';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -80,6 +80,7 @@
         last_play_url: null,
         last_lookup: null,
         last_tick: 0,
+        last_card_refresh_at: 0,
         last_player_hash: null,
         last_player_card: null,
         last_launched_card: null,
@@ -593,6 +594,30 @@
     //      использует префетч и она у юзера работает (значит CORS на этом
     //      коде проходит).
     // =========================================================================
+    var B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    var B32_VAL = (function () {
+        var o = {};
+        for (var bi = 0; bi < B32_ALPHABET.length; bi++) o[B32_ALPHABET.charAt(bi)] = bi;
+        return o;
+    }());
+
+    function base32ToHex(str) {
+        var bitsParts = [];
+        for (var i = 0; i < str.length; i++) {
+            var v = B32_VAL[str.charAt(i)];
+            if (v === undefined) return null;
+            var b = v.toString(2);
+            while (b.length < 5) b = '0' + b;
+            bitsParts.push(b);
+        }
+        var bits = bitsParts.join('');
+        var hex = '';
+        for (var j = 0; j + 4 <= bits.length; j += 4) {
+            hex += parseInt(bits.substr(j, 4), 2).toString(16);
+        }
+        return hex.toLowerCase().slice(0, 40);
+    }
+
     function magnetToHash(magnet) {
         if (!magnet) return null;
         var raw = String(magnet);
@@ -613,23 +638,6 @@
         return null;
     }
 
-    function base32ToHex(str) {
-        var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-        var bits = '';
-        for (var i = 0; i < str.length; i++) {
-            var v = alphabet.indexOf(str.charAt(i));
-            if (v < 0) return null;
-            var b = v.toString(2);
-            while (b.length < 5) b = '0' + b;
-            bits += b;
-        }
-        var hex = '';
-        for (var j = 0; j + 4 <= bits.length; j += 4) {
-            hex += parseInt(bits.substr(j, 4), 2).toString(16);
-        }
-        return hex.toLowerCase().slice(0, 40);
-    }
-
     // Async-only API для совместимости с прошлым кодом (prefetch / modal).
     // Если magnet валидный — отдаём хеш моментально без сети.
     // Если хеш извлечь не получилось — фолбэк через tsAddTorrent (POST /torrents
@@ -640,6 +648,13 @@
     function getTorrentHash(opts, onSuccess, onError) {
         var link = opts && opts.link;
         if (!link) { if (onError) onError(new Error('пустая ссылка')); return; }
+
+        var rawHash = String(link).match(/^[a-fA-F0-9]{40}$/);
+        if (rawHash) {
+            log('hash from raw infohash: ' + String(link).slice(0, 16) + '…');
+            if (onSuccess) onSuccess({ hash: String(link).toLowerCase() });
+            return;
+        }
 
         var localHash = magnetToHash(link);
         if (localHash) {
@@ -921,8 +936,7 @@
             window.addEventListener('pagehide', function () { cleanupIfEco('pagehide'); });
             window.addEventListener('focus', function () { scheduleReturnRefresh('window.focus'); });
             document.addEventListener('visibilitychange', function () {
-                if (document.hidden) cleanupIfEco('hidden');
-                else scheduleReturnRefresh('visible');
+                if (!document.hidden) scheduleReturnRefresh('visible');
             });
         });
     }
@@ -943,6 +957,17 @@
             if (oldBtn.length) oldBtn.remove();
             _runInject(activeMovie, render, { skipPrefetch: true });
         });
+    }
+
+    function refreshActiveCardSoon(movie, reason) {
+        if (!movie) return;
+        var now = Date.now();
+        if (now - S.last_card_refresh_at < 1500) return;
+        S.last_card_refresh_at = now;
+        setTimeout(function () {
+            log('active card refresh: ' + (reason || 'unknown'));
+            refreshActiveCardIfMatches(movie);
+        }, 80);
     }
 
     function prefetchFilesList(torrentLink, hash, movie, params) {
@@ -1484,6 +1509,7 @@
                     if (S.last_player_hash) flushHashFromTimeline(S.last_player_hash);
                     S.last_player_hash = hash;
                     touchEntryTimestamp(hash);
+                    refreshActiveCardSoon(S.last_player_card || S.last_launched_card, 'timeline hash changed');
                 }
 
                 var now = Date.now();
@@ -1493,6 +1519,7 @@
                 var p = readParams();
                 if (!p[hash]) return;
                 updateEntry(hash, { percent: road.percent, time: road.time, duration: road.duration });
+                refreshActiveCardSoon(S.last_player_card || S.last_launched_card, 'timeline update');
             });
             log('Timeline listener attached');
         });
@@ -1565,6 +1592,7 @@
             if (mIdx) patch.file_index = parseInt(mIdx[1]);
             updateEntry(hash, patch);
             touchEntryTimestamp(hash);
+            refreshActiveCardSoon(d.card, 'player start');
         };
         LISTENERS.player_destroy = function () {
             var playedCard = S.last_player_card;
@@ -2123,10 +2151,26 @@
     function addMenuRobust() {
         if (tryAddMenu()) return;
         var attempts = 0;
-        var iv = setInterval(function () {
+        var iv = 0;
+        var mo = null;
+        var cleanup = function () {
+            if (iv) { clearInterval(iv); iv = 0; }
+            if (mo) {
+                try { mo.disconnect(); } catch (e) {}
+                mo = null;
+            }
+        };
+        var tick = function () {
             attempts++;
-            if (tryAddMenu() || attempts >= MENU_RETRY_MAX) clearInterval(iv);
-        }, MENU_RETRY_MS);
+            if (tryAddMenu() || attempts >= MENU_RETRY_MAX) cleanup();
+        };
+        try {
+            mo = new MutationObserver(function () {
+                if (tryAddMenu()) cleanup();
+            });
+            mo.observe(document.documentElement, { childList: true, subtree: true });
+        } catch (e) {}
+        iv = setInterval(tick, MENU_RETRY_MS);
     }
 
     // =========================================================================
@@ -2246,9 +2290,15 @@
         if (DEBUG) log('--- boot complete, entries=' + Object.keys(readParams()).length + ' torrserver=' + (torrUrl() || 'NONE') + ' ---');
     }
 
+    var waitLampaDelayMs = 100;
     function waitLampa() {
-        if (safeLampa()) startBootstrap();
-        else setTimeout(waitLampa, 100);
+        if (safeLampa()) {
+            waitLampaDelayMs = 100;
+            startBootstrap();
+            return;
+        }
+        waitLampaDelayMs = Math.min(Math.floor(waitLampaDelayMs * 1.4), 500);
+        setTimeout(waitLampa, waitLampaDelayMs);
     }
 
     function startBootstrap() {
