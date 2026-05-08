@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '114';
+    var PLUGIN_VERSION = '120';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -72,8 +72,10 @@
         play_intercepted: 0,
         prefetched: 0,
         last_prefetched_link: null,
+        last_prefetched_index: null,
         prefetch_hash: null,
         prefetch_link: null,
+        prefetch_index: null,
         prefetch_pct: 0,
         prefetch_speed: 0,
         prefetch_started_at: 0,
@@ -93,11 +95,19 @@
         last_launched_at: 0,
         last_exit_summary_at: 0,
         last_exit_summary_hash: null,
+        modal_open: false,
         files_pending: {},
         cleanup_count: 0,
         last_cleanup_at: 0,
         last_cleanup_reason: '',
-        buffer_close: null
+        buffer_close: null,
+        boot_at: 0,
+        boot_heap_used: 0,
+        timeline_updates: 0,
+        file_view_changes: 0,
+        ts_requests: 0,
+        ts_request_errors: 0,
+        active_xhrs: 0
     };
 
     var TIMERS = { save: 0, click: 0 };
@@ -180,6 +190,22 @@
         if (seconds < 60) return Math.ceil(seconds) + ' с';
         if (seconds < 3600) return Math.ceil(seconds / 60) + ' мин';
         return (seconds / 3600).toFixed(1) + ' ч';
+    }
+
+    function fmtUptime(ms) {
+        if (!ms || ms < 0) return '—';
+        var s = Math.floor(ms / 1000);
+        var h = Math.floor(s / 3600);
+        var m = Math.floor((s % 3600) / 60);
+        var sec = s % 60;
+        if (h > 0) return h + 'ч ' + m + 'м ' + sec + 'с';
+        if (m > 0) return m + 'м ' + sec + 'с';
+        return sec + 'с';
+    }
+
+    function fmtSignedBytes(n) {
+        var sign = n >= 0 ? '+' : '−';
+        return sign + fmtBytes(Math.abs(n));
     }
 
     function safeLampa() {
@@ -484,6 +510,11 @@
     // (единственный авторитет): Lampa.Timeline.view(hash) может вернуть
     // закэшированное в памяти значение даже после resetEntry/clearTimelineEntry,
     // и тогда smart-next ложно срабатывает на «досмотренном» эпизоде.
+    // target всегда указывает на ПОСЛЕДНИЙ запущенный эпизод (params=current),
+    // чтобы кнопка «Продолжить SxEy» показывала именно его процент/время.
+    // Если он почти досмотрен (pct >= SMART_NEXT_PCT) и есть следующий —
+    // кладём его в nextParams: при клике откроем confirm-модал с выбором
+    // «Продолжить» / «Следующий», без тихого прыжка.
     function pickContinueTarget(movie) {
         var current = findStreamParams(movie);
         if (!current) return null;
@@ -499,18 +530,17 @@
             var next = findNextEpisodeParams(movie, current) || findNextEpisodeFromFiles(movie, current);
             if (!next) {
                 if (S.last_lookup) S.last_lookup.reason = 'next episode not in history, showing current';
-                return { params: current, isNext: false };
+                return { params: current, hasNext: false };
             }
             if (next.synthetic_next && S.last_lookup) S.last_lookup.reason = 'next episode from torrent files';
             return {
-                params: next,
-                isNext: true,
-                fromEpisode: { season: current.season, episode: current.episode },
-                fromParams: current,
-                fromPercent: Math.round(pct)
+                params: current,
+                hasNext: true,
+                nextParams: next,
+                currentPercent: Math.floor(pct)
             };
         }
-        return { params: current, isNext: false };
+        return { params: current, hasNext: false };
     }
 
     function cloneFresh(p) {
@@ -852,23 +882,32 @@
         var url = torrUrl();
         if (!url) { onErr && onErr(new Error('no torrserver')); return; }
         var xhr = new XMLHttpRequest();
+        S.ts_requests++;
+        S.active_xhrs++;
+        var done = false;
+        var finish = function () {
+            if (done) return;
+            done = true;
+            S.active_xhrs = Math.max(0, S.active_xhrs - 1);
+        };
         try {
             xhr.open('POST', url + '/torrents', true);
             xhr.setRequestHeader('Content-Type', 'text/plain;charset=UTF-8');
             xhr.timeout = 5000;
             xhr.onload = function () {
+                finish();
                 if (xhr.status >= 200 && xhr.status < 300) {
                     var json = null;
                     try { json = xhr.responseText ? JSON.parse(xhr.responseText) : {}; } catch (e) {}
                     onOk && onOk(json || {});
-                } else if (onErr) onErr(new Error('http ' + xhr.status));
+                } else { S.ts_request_errors++; if (onErr) onErr(new Error('http ' + xhr.status)); }
             };
-            xhr.onerror = function () { onErr && onErr(new Error('network')); };
-            xhr.ontimeout = function () { onErr && onErr(new Error('timeout')); };
+            xhr.onerror = function () { finish(); S.ts_request_errors++; onErr && onErr(new Error('network')); };
+            xhr.ontimeout = function () { finish(); S.ts_request_errors++; onErr && onErr(new Error('timeout')); };
             var payload = { action: action };
             if (body) for (var k in body) payload[k] = body[k];
             xhr.send(JSON.stringify(payload));
-        } catch (e) { onErr && onErr(e); }
+        } catch (e) { finish(); S.ts_request_errors++; onErr && onErr(e); }
     }
 
     // GET /echo — TorrServer health-check. Simple CORS, без preflight'а.
@@ -929,7 +968,9 @@
         S.files = {};
         S.files_pending = {};
         S.last_prefetched_link = null;
+        S.last_prefetched_index = null;
         S.prefetch_link = null;
+        S.prefetch_index = null;
         S.prefetch_hash = null;
         S.prefetch_pct = 0;
         S.prefetch_speed = 0;
@@ -1030,6 +1071,16 @@
         if (now - S.last_card_refresh_at < 1500) return;
         S.last_card_refresh_at = now;
         setTimeout(function () {
+            // Если у нас открыт Select-модал (smart-next / exit-summary /
+            // context-menu) — рефрешить карточку нельзя: refreshActiveCardIfMatches
+            // → _runInject → lockButtonFocus → Lampa.Controller.collectionFocus
+            // переключает контроллер, и Select мгновенно закрывается. Отложим до
+            // закрытия модала.
+            if (S.modal_open) {
+                S.last_card_refresh_at = 0;
+                setTimeout(function () { refreshActiveCardSoon(movie, (reason || 'unknown') + ' deferred'); }, 600);
+                return;
+            }
             log('active card refresh: ' + (reason || 'unknown'));
             refreshActiveCardIfMatches(movie);
         }, 80);
@@ -1061,12 +1112,18 @@
         if (!prefetchEnabled()) return;
         if (!params || !params.torrent_link || !params.file_name) return;
         if (!torrUrl()) return;
-        if (S.last_prefetched_link === params.torrent_link && S.prefetch_target_reached) {
-            log('prefetch skip: same link, target already reached');
+        // TorrServer preload работает per-file (по index в торренте). При смене
+        // эпизода в том же торренте index меняется → старый prefetch для нового
+        // файла бесполезен. Сравниваем link + index, а не только link.
+        var idx = (typeof params.file_index === 'number') ? params.file_index : 0;
+        var sameTarget = (S.last_prefetched_link === params.torrent_link &&
+                          S.last_prefetched_index === idx);
+        if (sameTarget && S.prefetch_target_reached) {
+            log('prefetch skip: same link+index, target already reached');
             return;
         }
-        if (S.last_prefetched_link === params.torrent_link && S.prefetch_poll_iv) {
-            log('prefetch skip: same link, polling already in progress');
+        if (sameTarget && S.prefetch_poll_iv) {
+            log('prefetch skip: same link+index, polling already in progress');
             return;
         }
 
@@ -1075,8 +1132,10 @@
 
         stopPrefetchPoll();
         S.last_prefetched_link = params.torrent_link;
+        S.last_prefetched_index = idx;
         S.prefetched++;
         S.prefetch_link = params.torrent_link;
+        S.prefetch_index = idx;
         S.prefetch_hash = null;
         S.prefetch_pct = 0;
         S.prefetch_speed = 0;
@@ -1085,7 +1144,9 @@
 
         var title = pickTitle(movie);
         var target = prefetchTarget();
-        log('prefetch start: "' + title + '" target=' + target + '%');
+        log('prefetch start: "' + title + '"' +
+            (params.season ? ' S' + params.season + 'E' + params.episode : '') +
+            ' file_index=' + idx + ' target=' + target + '%');
 
         getTorrentHash({
             link: params.torrent_link,
@@ -1104,14 +1165,16 @@
             if (movie.number_of_seasons) prefetchFilesList(params.torrent_link, hash, movie, params);
 
             var poll = function () {
-                if (S.prefetch_link !== params.torrent_link) { stopPrefetchPoll(); return; }
+                if (S.prefetch_link !== params.torrent_link || S.prefetch_index !== idx) {
+                    stopPrefetchPoll(); return;
+                }
                 if (Date.now() - S.prefetch_started_at > PREFETCH_TIMEOUT_MS) {
                     log('prefetch: timeout, last %=' + S.prefetch_pct);
                     stopPrefetchPoll();
                     return;
                 }
                 tsRequest('get', { hash: hash }, function (info) {
-                    if (S.prefetch_link !== params.torrent_link) return;
+                    if (S.prefetch_link !== params.torrent_link || S.prefetch_index !== idx) return;
                     var preBytes = info.preloaded_bytes || info.PreloadedBytes || 0;
                     var preSize = info.preload_size || info.PreloadSize || 0;
                     var pct = preSize > 0 ? Math.min(100, Math.round(preBytes / preSize * 100)) : 0;
@@ -1272,16 +1335,26 @@
             });
         }
 
-        var prefetched = (S.last_prefetched_link === params.torrent_link);
-        var cachedHash = (prefetched && S.prefetch_hash) ? S.prefetch_hash : null;
+        // Хеш торрента можно переиспользовать (он один на весь торрент), а вот
+        // preload — НЕТ: он работает per-file. При смене эпизода (того же торрента,
+        // другой index) prefetched-флаг не должен мешать запросу нового preload —
+        // иначе TorrServer не начнёт качать файл и модалка зависает на 0%.
+        var idx = (typeof params.file_index === 'number') ? params.file_index : 0;
+        var sameTorrent = (S.last_prefetched_link === params.torrent_link);
+        var sameFile    = (sameTorrent && S.last_prefetched_index === idx);
+        var cachedHash  = (sameTorrent && S.prefetch_hash) ? S.prefetch_hash : null;
 
         var startPolling = function (h) {
             hash = h;
             stopPrefetchPoll();
-            if (!prefetched) triggerPreload(streamUrl, 60000);
+            // Всегда триггерим preload для текущего file_index — даже если торрент
+            // уже добавлен и для другого файла этого торрента prefetch завершился.
+            if (!sameFile) triggerPreload(streamUrl, 60000);
             modal.find('.cw-buf__status').text(
-                S.prefetch_target_reached ? 'буфер уже накачан (prefetch ' + S.prefetch_pct + '%)' :
-                prefetched ? 'буферизация (prefetch активен, ' + S.prefetch_pct + '%)' : 'подключение к пирам…'
+                sameFile && S.prefetch_target_reached ? 'буфер уже накачан (prefetch ' + S.prefetch_pct + '%)' :
+                sameFile ? 'буферизация (prefetch активен, ' + S.prefetch_pct + '%)' :
+                sameTorrent ? 'торрент в TorrServer, запрашиваем файл #' + idx + '…' :
+                'подключение к пирам…'
             );
             poll();
             pollIv = setInterval(poll, BUFFER_POLL_MS);
@@ -1306,7 +1379,7 @@
             var tryAdd = function () {
                 attempts++;
                 modal.find('.cw-buf__status').text(
-                    attempts === 1 ? (prefetched ? 'торрент уже подгружается…' : 'добавление в TorrServer…')
+                    attempts === 1 ? (sameTorrent ? 'торрент уже добавлен, запрашиваем файл…' : 'добавление в TorrServer…')
                                    : 'повтор #' + attempts + '…'
                 );
                 getTorrentHash({
@@ -1587,6 +1660,7 @@
                 var hash = e.data && e.data.hash;
                 var road = e.data && e.data.road;
                 if (!hash || !road || typeof road.percent === 'undefined') return;
+                S.timeline_updates++;
 
                 var hashChanged = (S.last_player_hash !== hash);
 
@@ -1730,14 +1804,18 @@
                 setTimeout(function () {
                     flushHashFromTimeline(h);
                     flushPendingWrites();
-                    if (playedCard) maybeShowExitSummary(playedCard, h, 'player.destroy');
                 }, 700);
                 setTimeout(function () {
                     flushHashFromTimeline(h);
                     flushPendingWrites();
                     scheduleCardButtonRefresh(playedCard);
-                    if (playedCard) maybeShowExitSummary(playedCard, h, 'player.destroy.late');
                 }, 2200);
+                // Открываем exit-summary позже первой волны refresh'ей карточки,
+                // чтобы Lampa уже стабильно вернула фокус на карточку и наш Select
+                // не закрывался автоматически Lampa-controller'ом.
+                setTimeout(function () {
+                    if (playedCard) maybeShowExitSummary(playedCard, h, 'player.destroy');
+                }, 1500);
             }
         };
         safe('Player.listener', function () {
@@ -1761,6 +1839,13 @@
             (function (delay) {
                 setTimeout(function () {
                     safe('refreshOnDestroy', function () {
+                        // Не дёргаем DOM/контроллер, пока открыт Select-модал
+                        // (exit-summary / smart-next / context-menu) — иначе наш
+                        // collectionFocus в lockButtonFocus закроет Select.
+                        if (S.modal_open) {
+                            setTimeout(function () { scheduleCardButtonRefresh(playedCard); }, 800);
+                            return;
+                        }
                         var act = Lampa.Activity.active && Lampa.Activity.active();
                         if (!act) return;
                         var movie = act.movie || (act.activity && act.activity.movie);
@@ -1787,24 +1872,131 @@
     // =========================================================================
     // 12. Кнопка «Продолжить» на карточке
     // =========================================================================
-    function buildButtonHtml(dashArray, label, isNext) {
-        var nextCls = isNext ? ' button--continue-watch--next' : '';
-        var nextIco = isNext
-            ? '<svg class="cw-btn__nextico" viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">' +
-                '<path d="M6 5l8 7-8 7V5zM16 5h2v14h-2z" fill="currentColor"/>' +
-              '</svg>'
-            : '';
-        return '<div class="full-start__button selector button--continue-watch' + nextCls + '">' +
+    function buildButtonHtml(dashArray, label) {
+        return '<div class="full-start__button selector button--continue-watch">' +
             '<svg class="cw-btn__ico" viewBox="0 0 24 24" width="22" height="22" fill="none">' +
                 '<path d="M8 5v14l11-7L8 5z" fill="currentColor"/>' +
                 '<circle class="cw-btn__ring" cx="12" cy="12" r="10.5" stroke="currentColor" ' +
                     'stroke-width="1.5" fill="none" stroke-dasharray="' + dashArray + ' 65.97" ' +
                     'transform="rotate(-90 12 12)"/>' +
-            '</svg><div class="cw-btn__lbl">' + nextIco + label + '</div></div>';
+            '</svg><div class="cw-btn__lbl">' + label + '</div></div>';
     }
 
     function smartNextConfirmEnabled() { return getBoolPref(SMART_NEXT_CONFIRM_KEY, true); }
     function exitSummaryEnabled()      { return getBoolPref(EXIT_SUMMARY_KEY, true); }
+
+    // Компактный confirm-модал по центру экрана (DOM, не Lampa.Select).
+    // Lampa.Select на новых сборках открывается правым sidebar'ом — для простого
+    // «да/нет» это слишком тяжело. Свой DOM-модал проще, лучше управляется
+    // фокусом и не конфликтует с остальной разметкой Lampa Activity.
+    // opts: { title, subtitle?, primary:{label, onPick}, secondary:{label, onPick}, footer?:{label, onPick}, onClose? }
+    function showCenterConfirm(opts) {
+        var prevController = null;
+        try { prevController = Lampa.Controller.enabled() && Lampa.Controller.enabled().name; } catch (e) {}
+
+        var hasFooter = !!(opts.footer && opts.footer.label);
+        var modal = $(
+            '<div class="cw-cnf">' +
+                '<div class="cw-cnf__card">' +
+                    '<div class="cw-cnf__title"></div>' +
+                    '<div class="cw-cnf__sub"></div>' +
+                    '<div class="cw-cnf__btns">' +
+                        '<div class="selector cw-cnf__btn cw-cnf__btn--primary"></div>' +
+                        '<div class="selector cw-cnf__btn cw-cnf__btn--secondary"></div>' +
+                    '</div>' +
+                    (hasFooter ? '<div class="selector cw-cnf__foot"></div>' : '') +
+                '</div>' +
+            '</div>'
+        );
+
+        modal.find('.cw-cnf__title').text(opts.title || '');
+        if (opts.subtitle) modal.find('.cw-cnf__sub').text(opts.subtitle);
+        else modal.find('.cw-cnf__sub').remove();
+        modal.find('.cw-cnf__btn--primary').text(opts.primary.label);
+        modal.find('.cw-cnf__btn--secondary').text(opts.secondary.label);
+        if (hasFooter) modal.find('.cw-cnf__foot').text(opts.footer.label);
+
+        var closed = false;
+        function close() {
+            if (closed) return;
+            closed = true;
+            S.modal_open = false;
+            modal.remove();
+            safe('Controller.toggle', function () { Lampa.Controller.toggle(prevController || 'content'); });
+            if (typeof opts.onClose === 'function') safe('cnf.onClose', opts.onClose);
+        }
+        function pickAndClose(fn) {
+            close();
+            if (typeof fn === 'function') safe('cnf.pick', fn);
+        }
+
+        modal.find('.cw-cnf__btn--primary').on('hover:enter', function () { pickAndClose(opts.primary.onPick); });
+        modal.find('.cw-cnf__btn--secondary').on('hover:enter', function () { pickAndClose(opts.secondary.onPick); });
+        if (hasFooter) modal.find('.cw-cnf__foot').on('hover:enter', function () { pickAndClose(opts.footer.onPick); });
+
+        document.body.appendChild(modal[0]);
+        S.modal_open = true;
+        log('center confirm open: ' + opts.title);
+
+        safe('Controller.add.cnf', function () {
+            Lampa.Controller.add('cw_center_confirm', {
+                invisible: true,
+                toggle: function () {
+                    Lampa.Controller.collectionSet(modal);
+                    var primary = modal.find('.cw-cnf__btn--primary')[0];
+                    Lampa.Controller.collectionFocus(primary, modal);
+                },
+                left:  function () { try { if (Navigator.canmove('left'))  Navigator.move('left');  } catch (e) {} },
+                right: function () { try { if (Navigator.canmove('right')) Navigator.move('right'); } catch (e) {} },
+                up:    function () { try { if (Navigator.canmove('up'))    Navigator.move('up');    } catch (e) {} },
+                down:  function () { try { if (Navigator.canmove('down'))  Navigator.move('down');  } catch (e) {} },
+                back:  close
+            });
+            Lampa.Controller.toggle('cw_center_confirm');
+        });
+
+        return close;
+    }
+
+    // Открыть Lampa.Select.show с защитой от схлопывания: ставим S.modal_open,
+    // чтобы наши refresh'и (refreshActiveCardSoon / scheduleCardButtonRefresh /
+    // lockButtonFocus) не дёргали Lampa.Controller.collectionFocus и не
+    // переключали фокус с открытого Select на карточку. Перед открытием
+    // явно переводим контроллер в 'content' — это стабильное состояние,
+    // от которого Select.show корректно делает Controller.toggle('select').
+    function openSelectModal(opts, label) {
+        if (!Lampa.Select || !Lampa.Select.show) return false;
+        var name = label || 'select';
+        var origOnSelect = opts.onSelect;
+        var origOnBack   = opts.onBack;
+        var closed = false;
+        var markClosed = function () {
+            if (closed) return;
+            closed = true;
+            S.modal_open = false;
+            log('modal closed: ' + name);
+        };
+        opts.onSelect = function (item) {
+            markClosed();
+            safe(name + '.onSelect', function () { if (origOnSelect) origOnSelect(item); });
+        };
+        opts.onBack = function () {
+            markClosed();
+            safe(name + '.onBack', function () { if (origOnBack) origOnBack(); });
+        };
+        S.modal_open = true;
+        log('modal open: ' + name);
+        safe(name + '.toggle', function () {
+            if (Lampa.Controller && Lampa.Controller.enabled) {
+                var cur = Lampa.Controller.enabled();
+                if (!cur || cur.name !== 'content') Lampa.Controller.toggle('content');
+            }
+        });
+        var ok = false;
+        safe(name + '.show', function () { Lampa.Select.show(opts); ok = true; });
+        if (!ok) S.modal_open = false;
+        return ok;
+    }
 
     // Модалка «Сохранено» при выходе из плеера. Показывается один раз за сеанс
     // плеера (cooldown EXIT_SUMMARY_COOLDOWN_MS + dedupe по hash) и только если
@@ -1831,9 +2023,8 @@
     }
 
     function showExitSummary(movie, hash, params, reason) {
-        if (!Lampa.Select || !Lampa.Select.show) return;
-
-        var pct  = Math.round(params.percent || 0);
+        var pct  = Math.floor(params.percent || 0);
+        if (params.percent >= 100) pct = 100;
         var time = params.time || 0;
         var dur  = params.duration || 0;
         var ep   = (params.season && params.episode) ? ('S' + params.season + ' E' + params.episode) : '';
@@ -1846,155 +2037,75 @@
             ? 'Эпизод просмотрен полностью'
             : ('Сохранено: ' + posStr + (pct > 0 ? ' · ' + pct + '%' : ''));
 
-        var items = [];
-        items.push({
-            title: 'OK',
-            subtitle: 'закрыть и вернуться к карточке',
-            __cw_action: function () {}
-        });
-
         var isSeries = !!(movie.number_of_seasons && params.season && params.episode);
-        if (isSeries) {
-            var nxt = findNextEpisodeParams(movie, params) || findNextEpisodeFromFiles(movie, params);
-            if (nxt && (nxt.season !== params.season || nxt.episode !== params.episode)) {
-                items.push({
-                    title: 'Следующий: S' + nxt.season + ' E' + nxt.episode + ' (с начала)',
-                    subtitle: 'продолжить просмотр сериала',
-                    __cw_action: function () { launchPlayer(movie, cloneFresh(nxt), { startFresh: true }); }
-                });
-            }
-        }
-
-        if (pct < 100) {
-            items.push({
-                title: 'Отметить как просмотренный',
-                subtitle: ep ? ep : 'фильм',
-                __cw_action: function () {
-                    markWatched(hash, params);
-                    noty('Помечено как просмотренное');
-                    var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
-                    if (act && act.movie === movie && act.activity && act.activity.render) {
-                        refreshCardButton(movie, act.activity.render());
-                    }
-                }
-            });
-        }
-
-        items.push({
-            title: 'Сбросить прогресс',
-            subtitle: 'начать с начала в следующий раз',
-            __cw_action: function () {
-                resetEntry(hash);
-                noty('Прогресс сброшен');
-                var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
-                if (act && act.movie === movie && act.activity && act.activity.render) {
-                    refreshCardButton(movie, act.activity.render());
-                }
-            }
-        });
-
-        items.push({
-            title: 'Не показывать больше',
-            subtitle: 'отключить уведомление при выходе из плеера',
-            __cw_action: function () {
-                safe('cwExitSummaryOff', function () { Lampa.Storage.set(EXIT_SUMMARY_KEY, false); });
-                noty('Уведомление при выходе отключено');
-            }
-        });
+        var nxt = isSeries ? (findNextEpisodeParams(movie, params) || findNextEpisodeFromFiles(movie, params)) : null;
+        if (nxt && (nxt.season === params.season && nxt.episode === params.episode)) nxt = null;
 
         log('exit-summary: show (' + (reason || '?') + ') hash=' + String(hash).slice(0, 12) +
             '… pct=' + pct + ' time=' + time);
 
-        safe('Select.show.exit-summary', function () {
-            Lampa.Select.show({
-                title: titleLine,
-                subtitle: subLine,
-                items: items,
-                onSelect: function (item) {
-                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
-                    if (item && typeof item.__cw_action === 'function') {
-                        safe('exitSummaryAction', function () { item.__cw_action(); });
-                    }
-                },
-                onBack: function () {
-                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
+        var primary, secondary;
+        if (nxt) {
+            primary = {
+                label: 'Следующий S' + nxt.season + ' E' + nxt.episode,
+                onPick: function () { launchPlayer(movie, cloneFresh(nxt), { startFresh: true }); }
+            };
+            secondary = { label: 'OK', onPick: function () {} };
+        } else {
+            primary = { label: 'OK', onPick: function () {} };
+            secondary = {
+                label: 'Сбросить прогресс',
+                onPick: function () {
+                    resetEntry(hash);
+                    noty('Прогресс сброшен');
+                    var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                    if (act && act.activity && act.activity.render) refreshCardButton(movie, act.activity.render());
                 }
-            });
+            };
+        }
+
+        showCenterConfirm({
+            title: titleLine,
+            subtitle: subLine,
+            primary: primary,
+            secondary: secondary,
+            footer: {
+                label: 'Не показывать больше',
+                onPick: function () {
+                    safe('cwExitSummaryOff', function () { Lampa.Storage.set(EXIT_SUMMARY_KEY, false); });
+                    noty('Уведомление при выходе отключено');
+                }
+            }
         });
     }
 
-    // Smart-next подтверждение: когда плагин решил «предыдущий эпизод
-    // фактически просмотрен (≥ SMART_NEXT_PCT %) → запускаем следующий», мы
-    // не делаем тихий прыжок, а спрашиваем юзера. Полезно когда юзер забыл
-    // досмотрел или нет, или хочет пересмотреть конец предыдущей серии.
-    function showSmartNextDialog(movie, target, btn, render) {
-        if (!Lampa.Select || !Lampa.Select.show) {
-            // Fallback: тихий прыжок если Select API недоступен.
-            launchPlayer(movie, target.params);
-            return;
-        }
-        var prev = target.fromParams;
-        var nxt  = target.params;
-        var prevTimeStr = prev && prev.time ? formatTime(prev.time) : '';
-        var prevDurStr  = prev && prev.duration ? formatTime(prev.duration) : '';
-        var prevTail    = prevTimeStr && prevDurStr ? prevTimeStr + ' / ' + prevDurStr : (prevTimeStr || '');
+    // Компактный confirm по центру: предыдущий эпизод почти досмотрен,
+    // спрашиваем «Продолжить» (досмотреть текущий) или «Следующий»
+    // (запустить следующий с начала). Без правого sidebar'а Lampa.Select.
+    function showSmartNextConfirm(movie, target) {
+        var prev = target.params;
+        var nxt  = target.nextParams;
+        var ep   = (prev.season && prev.episode) ? ('S' + prev.season + ' E' + prev.episode) : '';
+        var nep  = (nxt.season  && nxt.episode)  ? ('S' + nxt.season  + ' E' + nxt.episode)  : '';
 
-        var items = [];
-        items.push({
-            title: 'Следующий: S' + nxt.season + ' E' + nxt.episode + ' (с начала)',
-            subtitle: 'продолжить просмотр сериала',
-            __cw_action: function () { launchPlayer(movie, cloneFresh(nxt), { startFresh: true }); }
-        });
-        if (prev) {
-            items.push({
-                title: 'Досмотреть S' + prev.season + ' E' + prev.episode +
-                    ' (' + target.fromPercent + '%' + (prevTail ? ' · ' + prevTail : '') + ')',
-                subtitle: 'вернуться к предыдущему с того же места',
-                __cw_action: function () { launchPlayer(movie, prev); }
-            });
-            var prevHash = generateHash(movie, prev.season, prev.episode);
-            items.push({
-                title: 'Пересмотреть S' + prev.season + ' E' + prev.episode + ' с начала',
-                __cw_action: function () { launchPlayer(movie, cloneFresh(prev), { startFresh: true }); }
-            });
-            items.push({
-                title: 'Отметить S' + prev.season + ' E' + prev.episode + ' как просмотренный и закрыть',
-                subtitle: 'не запускать ничего',
-                __cw_action: function () {
-                    markWatched(prevHash, prev);
-                    noty('Эпизод S' + prev.season + ' E' + prev.episode + ' помечен как просмотренный');
-                    refreshCardButton(movie, render, btn);
+        showCenterConfirm({
+            title: 'Эпизод ' + ep + ' просмотрен на ' + target.currentPercent + '%',
+            subtitle: 'Перейти к следующему эпизоду?',
+            primary: {
+                label: 'Следующий ' + nep,
+                onPick: function () { launchPlayer(movie, cloneFresh(nxt), { startFresh: true }); }
+            },
+            secondary: {
+                label: 'Продолжить ' + ep,
+                onPick: function () { launchPlayer(movie, prev); }
+            },
+            footer: {
+                label: 'Не спрашивать больше',
+                onPick: function () {
+                    safe('cwSmartNextOff', function () { Lampa.Storage.set(SMART_NEXT_CONFIRM_KEY, false); });
+                    launchPlayer(movie, cloneFresh(nxt), { startFresh: true });
                 }
-            });
-        }
-        items.push({
-            title: 'Не спрашивать больше',
-            subtitle: 'отключить подтверждение и запустить следующий',
-            __cw_action: function () {
-                safe('cwSmartNextOff', function () { Lampa.Storage.set(SMART_NEXT_CONFIRM_KEY, false); });
-                launchPlayer(movie, cloneFresh(nxt), { startFresh: true });
             }
-        });
-
-        var titleLine = prev
-            ? 'S' + prev.season + ' E' + prev.episode + ' просмотрен на ' + target.fromPercent + '%'
-            : 'Эпизод почти досмотрен';
-
-        safe('Select.show.smart-next', function () {
-            Lampa.Select.show({
-                title: titleLine,
-                subtitle: 'Что запустить?',
-                items: items,
-                onSelect: function (item) {
-                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
-                    if (item && typeof item.__cw_action === 'function') {
-                        safe('smartNextAction', function () { item.__cw_action(); });
-                    }
-                },
-                onBack: function () {
-                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
-                }
-            });
         });
     }
 
@@ -2008,8 +2119,13 @@
             if (btn) $(btn).css('opacity', 1);
         }, CLICK_DEBOUNCE_MS);
 
-        if (target.isNext && target.fromParams && smartNextConfirmEnabled()) {
-            showSmartNextDialog(movie, target, btn, render);
+        if (target.hasNext && target.nextParams && smartNextConfirmEnabled()) {
+            showSmartNextConfirm(movie, target);
+            return;
+        }
+        // hasNext + confirm выкл = тихий прыжок к следующему (старое поведение)
+        if (target.hasNext && target.nextParams) {
+            launchPlayer(movie, cloneFresh(target.nextParams), { startFresh: true });
             return;
         }
         launchPlayer(movie, target.params);
@@ -2023,7 +2139,7 @@
         var ep = isSeries ? ('S' + current.season + ' E' + current.episode) : '';
 
         if (isSeries) {
-            var nxt = target.isNext ? null : (findNextEpisodeParams(movie, current) || findNextEpisodeFromFiles(movie, current));
+            var nxt = target.nextParams || findNextEpisodeParams(movie, current) || findNextEpisodeFromFiles(movie, current);
             if (nxt && (nxt.season !== current.season || nxt.episode !== current.episode)) items.push({
                 title: 'Завершить и запустить следующий: S' + nxt.season + ' E' + nxt.episode,
                 action: function () {
@@ -2074,25 +2190,16 @@
 
         if (!items.length) return;
 
-        safe('Select.show', function () {
-            if (!Lampa.Select || !Lampa.Select.show) {
-                warn('Lampa.Select unavailable');
-                return;
-            }
-            Lampa.Select.show({
-                title: 'Действия с прогрессом',
-                items: items,
-                onSelect: function (item) {
-                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
-                    if (item && typeof item.action === 'function') {
-                        safe('contextAction', function () { item.action(); });
-                    }
-                },
-                onBack: function () {
-                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
+        openSelectModal({
+            title: 'Действия с прогрессом',
+            items: items,
+            onSelect: function (item) {
+                if (item && typeof item.action === 'function') {
+                    safe('contextAction', function () { item.action(); });
                 }
-            });
-        });
+            },
+            onBack: function () {}
+        }, 'context-menu');
     }
 
     // skipPrefetch: после деструктивных действий (reset/markWatched/delete) НЕ
@@ -2173,7 +2280,16 @@
         if (!target) { log('no continue target for "' + pickTitle(movie) + '"'); return; }
         var params = target.params;
 
-        if (!opts.skipPrefetch) prefetchTorrent(movie, params);
+        // Префетчим то, что юзер скорее всего запустит:
+        // - smart-next кейс (есть nextParams) → next эпизод того же торрента
+        //   (его file_index в TorrServer ещё не warmed up, на нём и будет ожидание).
+        // - иначе current (тот же файл, что показывает кнопка).
+        // У nextParams может не быть torrent_link/file_name (stub-запись) —
+        // prefetchTorrent сам это обработает (early return), без падения.
+        if (!opts.skipPrefetch) {
+            var prefetchTargetParams = target.nextParams || params;
+            prefetchTorrent(movie, prefetchTargetParams);
+        }
 
         var percent = 0, timeStr = '';
         var hash = generateHash(movie, params.season, params.episode);
@@ -2181,11 +2297,11 @@
         if (view && view.percent > 0) { percent = view.percent; timeStr = formatTime(view.time); }
         else if (params.time) { percent = params.percent || 0; timeStr = formatTime(params.time); }
 
-        var label = target.isNext ? 'Следующий' : 'Продолжить';
+        var label = 'Продолжить';
         if (params.season && params.episode) label += ' S' + params.season + ' E' + params.episode;
         if (timeStr) label += ' <span class="cw-btn__time">(' + timeStr + ')</span>';
 
-        var btn = $(buildButtonHtml((percent * 65.97 / 100).toFixed(2), label, !!target.isNext));
+        var btn = $(buildButtonHtml((percent * 65.97 / 100).toFixed(2), label));
         btn.on('hover:enter', function () { onClickContinue(movie, this, render, target); });
         btn.on('hover:long', function () { showContextMenu(movie, target, btn, render); });
 
@@ -2194,7 +2310,7 @@
 
         S.button_injected++;
         log('button INJECTED #' + S.button_injected + ' anchor=' + anchor +
-            ' isNext=' + target.isNext + ' %=' + percent);
+            ' hasNext=' + !!target.hasNext + ' %=' + percent);
 
         lockButtonFocus(render, btn);
     }
@@ -2277,6 +2393,7 @@
                     S.ts_url = null;
                 }
                 if (isFileViewKey(e.name)) {
+                    S.file_view_changes++;
                     log('storage change: ' + e.name + ' (file_view) — syncing progress');
                     onFileViewChanged();
                 }
@@ -2411,6 +2528,47 @@
             prefetchStatus +
             ' · <span style="opacity:.6">cw.prefetch(true|false, %)</span>'));
 
+        if (S.last_prefetched_link) {
+            var pfState = S.prefetch_target_reached
+                ? '<span style="color:#7c7">готово</span>'
+                : (S.prefetch_poll_iv ? '<span style="color:#fc7">качается…</span>' : '<span style="opacity:.6">остановлен</span>');
+            var sinceMs = S.prefetch_started_at ? (Date.now() - S.prefetch_started_at) : 0;
+            var sinceStr = sinceMs ? Math.round(sinceMs / 1000) + 'с назад' : '—';
+            var linkLabel = (S.last_prefetched_link || '').slice(0, 60) + (S.last_prefetched_link.length > 60 ? '…' : '');
+            var hashLabel = S.prefetch_hash ? (S.prefetch_hash.slice(0, 16) + '…') : '<span style="opacity:.6">нет</span>';
+            var entry = (function () {
+                var p = readParams();
+                var ix = S.title_index || buildIndex();
+                for (var t in ix) {
+                    var hashes = ix[t];
+                    for (var k = 0; k < hashes.length; k++) {
+                        var rec = p[hashes[k]];
+                        if (rec && rec.torrent_link === S.last_prefetched_link &&
+                            (typeof rec.file_index !== 'number' || rec.file_index === S.last_prefetched_index)) {
+                            return rec;
+                        }
+                    }
+                }
+                return null;
+            }());
+            var epLabel = entry && entry.season ?
+                ('"' + entry.title + '" S' + entry.season + ' E' + entry.episode) :
+                (entry ? ('"' + entry.title + '"') : '<span style="opacity:.6">не привязан к нашей записи</span>');
+            body.append(row('▸ активный prefetch-таргет',
+                pfState +
+                ' · буфер: <b>' + S.prefetch_pct + '%</b>' +
+                ' · скорость: ' + fmtSpeed(S.prefetch_speed) +
+                ' · стартовал: ' + sinceStr +
+                '<br><span style="opacity:.7;font-family:monospace;font-size:.85em">' +
+                'index=<b>' + (S.last_prefetched_index === null ? '—' : S.last_prefetched_index) + '</b>' +
+                ' · hash=' + hashLabel +
+                ' · файл: ' + epLabel +
+                '<br>link=' + linkLabel +
+                '</span>'));
+        } else {
+            body.append(row('▸ активный prefetch-таргет', '<span style="opacity:.6">не запущен</span>'));
+        }
+
         var mem = memorySnapshot();
         body.append(row('Eco cleanup',
             (ecoModeEnabled() ? '<span style="color:#7c7">ВКЛ</span>' : '<span style="color:#f66">ВЫКЛ</span>') +
@@ -2423,6 +2581,45 @@
         body.append(row('JS heap',
             mem ? (fmtBytes(mem.used) + ' / ' + fmtBytes(mem.total) + ' · limit ' + fmtBytes(mem.limit)) :
                 '<span style="opacity:.6">performance.memory недоступен в этом WebView</span>'));
+
+        var uptimeMs = S.boot_at ? (Date.now() - S.boot_at) : 0;
+        var uptimeMin = uptimeMs / 60000;
+        var heapDelta = (mem && S.boot_heap_used) ? (mem.used - S.boot_heap_used) : 0;
+        var heapPerMin = (uptimeMin > 0.5 && heapDelta) ? (heapDelta / uptimeMin) : 0;
+
+        // Активные «удержания» (то что прямо сейчас держит CPU/память):
+        // - prefetch poll-интервал (1.5с тики опроса TorrServer)
+        // - storage debounce (отложенная запись в Lampa.Storage)
+        // - открытый buffer-modal (свой 1с poll внутри)
+        // - открытый Select/center-confirm модал
+        // - in-flight XHR запросы к TorrServer
+        var holds = [];
+        if (S.prefetch_poll_iv) holds.push('prefetch poll (' + (PREFETCH_POLL_MS / 1000).toFixed(1) + 'с)');
+        if (TIMERS.save) holds.push('storage debounce');
+        if (TIMERS.click) holds.push('click debounce');
+        if (S.buffer_close) holds.push('buffer modal poll');
+        if (S.modal_open) holds.push('confirm modal');
+        if (S.active_xhrs > 0) holds.push(S.active_xhrs + ' XHR в полёте');
+
+        var rate = function (n) {
+            if (uptimeMin < 0.5) return n + '';
+            return n + ' (' + (n / uptimeMin).toFixed(1) + '/мин)';
+        };
+
+        body.append(row('▸ нагрузка плагина',
+            'uptime: <b>' + fmtUptime(uptimeMs) + '</b>' +
+            (heapDelta ? ' · heap: <b>' + fmtSignedBytes(heapDelta) + '</b>' +
+                (heapPerMin ? ' (' + fmtSignedBytes(heapPerMin) + '/мин)' : '') : '') +
+            ' · WebView: ' + (document.hidden ? '<span style="color:#fc7">hidden</span>' : '<span style="color:#7c7">visible</span>') +
+            '<br><span style="opacity:.7;font-family:monospace;font-size:.85em">' +
+            'активно: ' + (holds.length ? '<b>' + holds.join(' · ') + '</b>' : '<span style="opacity:.6">ничего</span>') +
+            '<br>события: timeline=' + rate(S.timeline_updates) +
+            ' · file_view=' + rate(S.file_view_changes) +
+            ' · full:complite=' + S.full_events +
+            '<br>сеть: TorrServer=' + S.ts_requests + ' (ошибок ' + S.ts_request_errors + ')' +
+            ' · XHR в полёте: <b>' + S.active_xhrs + '</b>' +
+            ' · plugin keys: <b>' + Object.keys(S.mem || {}).length + '</b>' +
+            '</span>'));
 
         body.append(row('Smart next-episode',
             'порог: <b>' + SMART_NEXT_PCT + '%</b>' +
@@ -2483,9 +2680,16 @@
             '.button--continue-watch .cw-btn__ico{margin-right:.5em}' +
             '.button--continue-watch .cw-btn__ring{opacity:.5}' +
             '.button--continue-watch .cw-btn__time{opacity:.7;font-size:.9em;margin-left:.3em}' +
-            '.button--continue-watch .cw-btn__nextico{margin-right:.4em;vertical-align:-.1em;opacity:.85}' +
-            '.button--continue-watch--next .cw-btn__ring{stroke:#ffd166;opacity:.95}' +
-            '.button--continue-watch--next .cw-btn__ico{color:#ffd166}' +
+            '.cw-cnf{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:9999;padding:1em}' +
+            '.cw-cnf__card{background:#1a1a1f;border-radius:1em;padding:1.4em 1.6em;min-width:26em;max-width:34em;box-shadow:0 12px 40px rgba(0,0,0,.6);color:#fff;text-align:center}' +
+            '.cw-cnf__title{font-size:1.2em;font-weight:bold;margin-bottom:.4em}' +
+            '.cw-cnf__sub{opacity:.75;font-size:1em;margin-bottom:1.2em}' +
+            '.cw-cnf__btns{display:flex;gap:.6em}' +
+            '.cw-cnf__btn{flex:1;padding:.85em 1em;text-align:center;border-radius:.5em;background:rgba(255,255,255,.08);cursor:pointer;font-size:1em;line-height:1.2}' +
+            '.cw-cnf__btn--primary{background:rgba(124,58,237,.4)}' +
+            '.cw-cnf__btn.focus{background:#fff;color:#000}' +
+            '.cw-cnf__foot{margin-top:.9em;font-size:.85em;opacity:.55;cursor:pointer;padding:.4em}' +
+            '.cw-cnf__foot.focus{opacity:1;color:#fff;background:rgba(255,255,255,.1);border-radius:.4em}' +
             '.cw-buf{position:fixed;inset:0;background:rgba(0,0,0,.78);display:flex;align-items:center;justify-content:center;z-index:9999;padding:1em;font-size:1em}' +
             '.cw-buf__card{background:#1a1a1f;border-radius:1em;padding:1.6em 2em;min-width:38em;max-width:48em;box-shadow:0 12px 40px rgba(0,0,0,.6);color:#fff}' +
             '.cw-buf__head{display:flex;align-items:center;gap:1em;margin-bottom:1em}' +
@@ -2618,7 +2822,7 @@
                     enabled: prefetchEnabled(), target: prefetchTarget(),
                     count: S.prefetched, last_pct: S.prefetch_pct,
                     last_speed: S.prefetch_speed, target_reached: S.prefetch_target_reached,
-                    last_link: S.last_prefetched_link
+                    last_link: S.last_prefetched_link, last_index: S.last_prefetched_index
                 };
             },
             eco: function (enabled) {
@@ -2667,6 +2871,9 @@
         if (S.booted) return;
         S.booted = true;
         S.account_ready = true;
+        S.boot_at = Date.now();
+        var bootMem = memorySnapshot();
+        S.boot_heap_used = bootMem ? bootMem.used : 0;
 
         if (DEBUG) {
             log('--- boot v' + PLUGIN_VERSION + ' ---');
