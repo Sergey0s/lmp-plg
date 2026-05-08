@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '109';
+    var PLUGIN_VERSION = '114';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -39,8 +39,12 @@
     var PREFETCH_TIMEOUT_MS = 120000;
     var ECO_MODE_KEY        = 'cw_eco_mode';
 
-    var SMART_NEXT_PCT     = 92;
-    var TIMELINE_STORE_KEY = 'file_view';
+    var SMART_NEXT_PCT          = 92;
+    var SMART_NEXT_CONFIRM_KEY  = 'cw_smart_next_confirm';
+    var EXIT_SUMMARY_KEY        = 'cw_exit_summary';
+    var EXIT_SUMMARY_COOLDOWN_MS = 60 * 1000;
+    var EXIT_SUMMARY_MIN_TIME_S  = 5;
+    var TIMELINE_STORE_KEY      = 'file_view';
 
     var MIGRATION_FLAG_KEY = 'continue_watch_params__migrated_to_profiles';
     var TORR_ALT_KEYS = [
@@ -83,8 +87,12 @@
         last_card_refresh_at: 0,
         last_player_hash: null,
         last_player_card: null,
+        session_play_hash: null,
+        session_play_card: null,
         last_launched_card: null,
         last_launched_at: 0,
+        last_exit_summary_at: 0,
+        last_exit_summary_hash: null,
         files_pending: {},
         cleanup_count: 0,
         last_cleanup_at: 0,
@@ -274,6 +282,15 @@
         var params = readParams();
         var isNew = !params[hash];
         if (isNew) params[hash] = {};
+
+        // Не позволяем обнулять duration уже сохранённой записи: внешние плееры
+        // (ViMu и др.) присылают через Lampa.Timeline.update timeline с
+        // duration=0 при ended=true, мы бы потеряли реальную длительность,
+        // нужную для смарт-next и UI.
+        if (data && typeof data.duration === 'number' && data.duration === 0 &&
+            params[hash] && typeof params[hash].duration === 'number' && params[hash].duration > 0) {
+            data = (function () { var c = {}; for (var k in data) c[k] = data[k]; delete c.duration; return c; }());
+        }
 
         var changed = false;
         for (var k in data) {
@@ -485,7 +502,13 @@
                 return { params: current, isNext: false };
             }
             if (next.synthetic_next && S.last_lookup) S.last_lookup.reason = 'next episode from torrent files';
-            return { params: next, isNext: true, fromEpisode: { season: current.season, episode: current.episode } };
+            return {
+                params: next,
+                isNext: true,
+                fromEpisode: { season: current.season, episode: current.episode },
+                fromParams: current,
+                fromPercent: Math.round(pct)
+            };
         }
         return { params: current, isNext: false };
     }
@@ -919,6 +942,8 @@
         S.last_cleanup_at = Date.now();
         S.last_cleanup_reason = reason || 'manual';
         log('runtime cleanup: ' + S.last_cleanup_reason);
+        S.session_play_hash = null;
+        S.session_play_card = null;
     }
 
     function scheduleReturnRefresh(reason) {
@@ -928,15 +953,55 @@
         scheduleCardButtonRefresh(S.last_launched_card);
     }
 
+    function flushProgressAfterExternalReturn(reason) {
+        var h = S.last_player_hash || S.session_play_hash;
+        if (!h) return;
+        log('resume flush timeline → storage (' + (reason || '') + ') hash=' + String(h).slice(0, 12) + '…');
+        var ok = syncEntryFromFileView(h);
+        if (!ok) flushHashFromTimeline(h);
+        flushPendingWrites();
+        if (ok) {
+            var card = S.last_player_card || S.session_play_card || S.last_launched_card;
+            if (card) maybeShowExitSummary(card, h, 'external.return');
+        }
+    }
+
+    // Lampa Android вызывает Lampa.Timeline.update() уже после нашего focus/
+    // visible-эвента (нативный onActivityResult → evaluateJavascript идёт
+    // асинхронно). Делаем серию проб с расширяющимися интервалами, чтобы
+    // гарантированно подцепить запись file_view, как только она попадёт
+    // в Storage. Stop-условие: timeline уже синхронизирован успешно.
+    function scheduleResumeFlushes(reason) {
+        var attempts = [120, 380, 900, 1800, 3200, 5000];
+        var card = S.last_player_card || S.session_play_card || S.last_launched_card;
+        for (var i = 0; i < attempts.length; i++) {
+            (function (delay) {
+                setTimeout(function () {
+                    if (document.hidden) return;
+                    flushProgressAfterExternalReturn(reason);
+                    if (card) {
+                        S.last_card_refresh_at = 0;
+                        refreshActiveCardSoon(card, 'resume #' + delay);
+                    }
+                }, delay);
+            }(attempts[i]));
+        }
+    }
+
     function attachLifecycleCleanup() {
         var cleanupIfEco = function (reason) {
             if (ecoModeEnabled()) cleanupRuntime(reason);
         };
+        var onAppBecameActive = function (reason) {
+            scheduleResumeFlushes(reason);
+            scheduleReturnRefresh(reason);
+        };
         safe('lifecycle.cleanup', function () {
             window.addEventListener('pagehide', function () { cleanupIfEco('pagehide'); });
-            window.addEventListener('focus', function () { scheduleReturnRefresh('window.focus'); });
+            window.addEventListener('focus', function () { onAppBecameActive('window.focus'); });
+            window.addEventListener('pageshow', function () { onAppBecameActive('pageshow'); });
             document.addEventListener('visibilitychange', function () {
-                if (!document.hidden) scheduleReturnRefresh('visible');
+                if (!document.hidden) onAppBecameActive('visible');
             });
         });
     }
@@ -1322,8 +1387,13 @@
         var doPlay = function (playlist) {
             data.playlist = (playlist && playlist.length) ? playlist : fallbackPlaylist;
             if (timeline.time > 0) noty('Восстанавливаем: ' + formatTime(timeline.time));
-            Lampa.Player.play(data);
+            var epHash = generateHash(movie, params.season, params.episode);
+            if (epHash) {
+                S.session_play_hash = epHash;
+                S.session_play_card = movie;
+            }
             attachPlayerListeners();
+            Lampa.Player.play(data);
             try { Lampa.Player.callback(function () { Lampa.Controller.toggle('content'); }); } catch (e) {}
             log('player started, playlist=' + data.playlist.length + ' items');
         };
@@ -1493,6 +1563,24 @@
     // =========================================================================
     // 11. Timeline listener — обновление процента/времени (единственная точка)
     // =========================================================================
+    // Когда плеер переключается на следующую серию (auto-next в playlist'е,
+    // ручной next-episode), Lampa.Timeline.update прилетает для нового hash,
+    // которого может не быть в нашем continue_watch_params — например если
+    // loadEpisodesPlaylist не успел подгрузить полный список из torrent files
+    // или если url playlist'а отличается от /stream/ формата. Создаём
+    // минимальную запись на лету: title тянем из последней известной карточки,
+    // season/episode оставляем undefined — они проставятся в Player.listener
+    // start как только тот сработает. Главное — прогресс не теряется.
+    function ensureEntryForLivePlayback(hash) {
+        var p = readParams();
+        if (p[hash]) return true;
+        var card = S.last_player_card || S.session_play_card || S.last_launched_card;
+        if (!card) return false;
+        updateEntry(hash, { title: pickTitle(card) });
+        log('timeline: created stub entry for hash=' + String(hash).slice(0, 12) + '… (auto-next?)');
+        return true;
+    }
+
     function attachTimelineListener() {
         safe('Timeline.listener', function () {
             Lampa.Timeline.listener.follow('update', function (e) {
@@ -1500,24 +1588,38 @@
                 var road = e.data && e.data.road;
                 if (!hash || !road || typeof road.percent === 'undefined') return;
 
+                var hashChanged = (S.last_player_hash !== hash);
+
                 // Хеш в обновлении — это активная серия в плеере. Если он
                 // отличается от того, что у нас зафиксировано как «текущая
-                // играющая серия», значит плеер переключился (авто-next /
+                // играющая серия», значит плеер переключился (auto-next /
                 // ручной next-episode). Сбрасываем старый hash в storage
-                // и проставляем свежий timestamp новой серии.
-                if (S.last_player_hash !== hash) {
+                // и сбрасываем throttle, чтобы первый тик новой серии гарантированно
+                // прошёл и прогресс не потерялся в гонке throttle vs смена серии.
+                if (hashChanged) {
                     if (S.last_player_hash) flushHashFromTimeline(S.last_player_hash);
                     S.last_player_hash = hash;
+                    S.last_tick = 0;
                     touchEntryTimestamp(hash);
                     refreshActiveCardSoon(S.last_player_card || S.last_launched_card, 'timeline hash changed');
                 }
 
                 var now = Date.now();
-                if (now - S.last_tick < TIMELINE_THROTTLE_MS) return;
+                // Не throttl'им если: hash только что изменился, или процент
+                // дёрнулся заметно (≥5%), или серия близка к концу (≥SMART_NEXT_PCT) —
+                // эти сэмплы критичны для smart-next и для отображения «Продолжить».
+                var pctNum = (typeof road.percent === 'number') ? road.percent : 0;
+                var bypass = hashChanged || pctNum >= SMART_NEXT_PCT;
+                if (!bypass) {
+                    var p0 = readParams()[hash];
+                    if (p0 && typeof p0.percent === 'number' && Math.abs(pctNum - p0.percent) >= 5) {
+                        bypass = true;
+                    }
+                }
+                if (!bypass && (now - S.last_tick) < TIMELINE_THROTTLE_MS) return;
                 S.last_tick = now;
 
-                var p = readParams();
-                if (!p[hash]) return;
+                if (!ensureEntryForLivePlayback(hash)) return;
                 updateEntry(hash, { percent: road.percent, time: road.time, duration: road.duration });
                 refreshActiveCardSoon(S.last_player_card || S.last_launched_card, 'timeline update');
             });
@@ -1532,14 +1634,18 @@
     function flushHashFromTimeline(hash) {
         if (!hash) return;
         safe('flushHashFromTimeline', function () {
+            // Сначала пробуем самый надёжный источник — Storage 'file_view*'
+            // (его обновляет и внутренний плеер, и нативный bridge для
+            // внешних плееров типа ViMu). Lampa.Timeline.view() — fallback,
+            // он может возвращать кэш в памяти.
+            if (syncEntryFromFileView(hash)) return;
             var tl = Lampa.Timeline.view(hash);
             if (!tl) return;
             var pct = (typeof tl.percent === 'number') ? tl.percent : 0;
             var t = tl.time || 0;
             var dur = tl.duration || 0;
             if (!pct && !t && !dur) return;
-            var p = readParams();
-            if (!p[hash]) return;
+            if (!ensureEntryForLivePlayback(hash)) return;
             updateEntry(hash, { percent: pct, time: t, duration: dur });
         });
     }
@@ -1572,38 +1678,67 @@
         LISTENERS.player_start = function (d) {
             if (!d || !d.card) return;
             var hash = generateHash(d.card, d.season, d.episode);
+            if (!hash) return;
+
             var mFile = d.url && d.url.match(/\/stream\/([^?]+)/);
-            if (!mFile) return;
+            var mLink = d.url && d.url.match(/[?&]link=([^&]+)/);
+            var mIdx = d.url && d.url.match(/[?&]index=(\d+)/);
 
             if (S.last_player_hash && S.last_player_hash !== hash) {
                 flushHashFromTimeline(S.last_player_hash);
+                S.last_tick = 0;
             }
             S.last_player_hash = hash;
             S.last_player_card = d.card;
 
-            var mLink = d.url && d.url.match(/[?&]link=([^&]+)/);
-            var mIdx = d.url && d.url.match(/[?&]index=(\d+)/);
             var patch = {
-                file_name: decodeURIComponent(mFile[1]),
                 title: pickTitle(d.card),
-                season: d.season, episode: d.episode
+                season: d.season,
+                episode: d.episode
             };
-            if (mLink) patch.torrent_link = mLink[1];
-            if (mIdx) patch.file_index = parseInt(mIdx[1]);
+            if (mFile) {
+                patch.file_name = decodeURIComponent(mFile[1]);
+                if (mLink) patch.torrent_link = mLink[1];
+                if (mIdx) patch.file_index = parseInt(mIdx[1], 10);
+            } else {
+                var existing = readParams()[hash];
+                if (existing) {
+                    if (existing.torrent_link) patch.torrent_link = existing.torrent_link;
+                    if (existing.file_name) patch.file_name = existing.file_name;
+                    if (typeof existing.file_index !== 'undefined') patch.file_index = existing.file_index;
+                }
+                log('player start: no /stream/ in url (external player?) — using stored torrent fields if any');
+            }
             updateEntry(hash, patch);
             touchEntryTimestamp(hash);
             refreshActiveCardSoon(d.card, 'player start');
         };
         LISTENERS.player_destroy = function () {
-            var playedCard = S.last_player_card;
-            if (S.last_player_hash) {
-                flushHashFromTimeline(S.last_player_hash);
-                S.last_player_hash = null;
+            var h = S.last_player_hash || S.session_play_hash;
+            var playedCard = S.last_player_card || S.session_play_card || S.last_launched_card;
+            if (h) {
+                flushHashFromTimeline(h);
+                flushPendingWrites();
             }
+            S.last_player_hash = null;
             S.last_player_card = null;
-            flushPendingWrites();
+            S.session_play_hash = null;
+            S.session_play_card = null;
             detachPlayerListeners();
             scheduleCardButtonRefresh(playedCard);
+            if (h) {
+                setTimeout(function () {
+                    flushHashFromTimeline(h);
+                    flushPendingWrites();
+                    if (playedCard) maybeShowExitSummary(playedCard, h, 'player.destroy');
+                }, 700);
+                setTimeout(function () {
+                    flushHashFromTimeline(h);
+                    flushPendingWrites();
+                    scheduleCardButtonRefresh(playedCard);
+                    if (playedCard) maybeShowExitSummary(playedCard, h, 'player.destroy.late');
+                }, 2200);
+            }
         };
         safe('Player.listener', function () {
             Lampa.Player.listener.follow('start', LISTENERS.player_start);
@@ -1620,7 +1755,7 @@
     // может вернуться поверх нашей кнопки. Делаем несколько дешёвых повторов.
     function scheduleCardButtonRefresh(playedCard) {
         var expectedTitle = pickTitle(playedCard);
-        var delays = [250, 800, 1600];
+        var delays = [250, 800, 1600, 3200, 5200];
 
         for (var i = 0; i < delays.length; i++) {
             (function (delay) {
@@ -1652,25 +1787,231 @@
     // =========================================================================
     // 12. Кнопка «Продолжить» на карточке
     // =========================================================================
-    function buildButtonHtml(dashArray, label) {
-        return '<div class="full-start__button selector button--continue-watch">' +
+    function buildButtonHtml(dashArray, label, isNext) {
+        var nextCls = isNext ? ' button--continue-watch--next' : '';
+        var nextIco = isNext
+            ? '<svg class="cw-btn__nextico" viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">' +
+                '<path d="M6 5l8 7-8 7V5zM16 5h2v14h-2z" fill="currentColor"/>' +
+              '</svg>'
+            : '';
+        return '<div class="full-start__button selector button--continue-watch' + nextCls + '">' +
             '<svg class="cw-btn__ico" viewBox="0 0 24 24" width="22" height="22" fill="none">' +
                 '<path d="M8 5v14l11-7L8 5z" fill="currentColor"/>' +
                 '<circle class="cw-btn__ring" cx="12" cy="12" r="10.5" stroke="currentColor" ' +
                     'stroke-width="1.5" fill="none" stroke-dasharray="' + dashArray + ' 65.97" ' +
                     'transform="rotate(-90 12 12)"/>' +
-            '</svg><div class="cw-btn__lbl">' + label + '</div></div>';
+            '</svg><div class="cw-btn__lbl">' + nextIco + label + '</div></div>';
     }
 
-    function onClickContinue(movie, btn) {
+    function smartNextConfirmEnabled() { return getBoolPref(SMART_NEXT_CONFIRM_KEY, true); }
+    function exitSummaryEnabled()      { return getBoolPref(EXIT_SUMMARY_KEY, true); }
+
+    // Модалка «Сохранено» при выходе из плеера. Показывается один раз за сеанс
+    // плеера (cooldown EXIT_SUMMARY_COOLDOWN_MS + dedupe по hash) и только если
+    // мы реально что-то посмотрели (≥ EXIT_SUMMARY_MIN_TIME_S сек или percent>0).
+    // Триггеры: Player.destroy (внутренний плеер) и file_view-change (внешний
+    // плеер на Android, где Player.listener не работает — см. issue 244).
+    function maybeShowExitSummary(card, hash, reason) {
+        if (!exitSummaryEnabled()) return false;
+        if (!card || !hash) return false;
+        var p = readParams()[hash];
+        if (!p) return false;
+        var pct = (typeof p.percent === 'number') ? p.percent : 0;
+        var t   = p.time || 0;
+        if (pct <= 0 && t < EXIT_SUMMARY_MIN_TIME_S) return false;
+
+        var now = Date.now();
+        if (S.last_exit_summary_hash === hash &&
+            (now - S.last_exit_summary_at) < EXIT_SUMMARY_COOLDOWN_MS) return false;
+        S.last_exit_summary_at = now;
+        S.last_exit_summary_hash = hash;
+
+        showExitSummary(card, hash, p, reason);
+        return true;
+    }
+
+    function showExitSummary(movie, hash, params, reason) {
+        if (!Lampa.Select || !Lampa.Select.show) return;
+
+        var pct  = Math.round(params.percent || 0);
+        var time = params.time || 0;
+        var dur  = params.duration || 0;
+        var ep   = (params.season && params.episode) ? ('S' + params.season + ' E' + params.episode) : '';
+        var posStr = formatTime(time) + (dur ? (' / ' + formatTime(dur)) : '');
+
+        var titleLine = ep
+            ? (pickTitle(movie) + ' · ' + ep)
+            : pickTitle(movie);
+        var subLine = (pct >= 100)
+            ? 'Эпизод просмотрен полностью'
+            : ('Сохранено: ' + posStr + (pct > 0 ? ' · ' + pct + '%' : ''));
+
+        var items = [];
+        items.push({
+            title: 'OK',
+            subtitle: 'закрыть и вернуться к карточке',
+            __cw_action: function () {}
+        });
+
+        var isSeries = !!(movie.number_of_seasons && params.season && params.episode);
+        if (isSeries) {
+            var nxt = findNextEpisodeParams(movie, params) || findNextEpisodeFromFiles(movie, params);
+            if (nxt && (nxt.season !== params.season || nxt.episode !== params.episode)) {
+                items.push({
+                    title: 'Следующий: S' + nxt.season + ' E' + nxt.episode + ' (с начала)',
+                    subtitle: 'продолжить просмотр сериала',
+                    __cw_action: function () { launchPlayer(movie, cloneFresh(nxt), { startFresh: true }); }
+                });
+            }
+        }
+
+        if (pct < 100) {
+            items.push({
+                title: 'Отметить как просмотренный',
+                subtitle: ep ? ep : 'фильм',
+                __cw_action: function () {
+                    markWatched(hash, params);
+                    noty('Помечено как просмотренное');
+                    var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                    if (act && act.movie === movie && act.activity && act.activity.render) {
+                        refreshCardButton(movie, act.activity.render());
+                    }
+                }
+            });
+        }
+
+        items.push({
+            title: 'Сбросить прогресс',
+            subtitle: 'начать с начала в следующий раз',
+            __cw_action: function () {
+                resetEntry(hash);
+                noty('Прогресс сброшен');
+                var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                if (act && act.movie === movie && act.activity && act.activity.render) {
+                    refreshCardButton(movie, act.activity.render());
+                }
+            }
+        });
+
+        items.push({
+            title: 'Не показывать больше',
+            subtitle: 'отключить уведомление при выходе из плеера',
+            __cw_action: function () {
+                safe('cwExitSummaryOff', function () { Lampa.Storage.set(EXIT_SUMMARY_KEY, false); });
+                noty('Уведомление при выходе отключено');
+            }
+        });
+
+        log('exit-summary: show (' + (reason || '?') + ') hash=' + String(hash).slice(0, 12) +
+            '… pct=' + pct + ' time=' + time);
+
+        safe('Select.show.exit-summary', function () {
+            Lampa.Select.show({
+                title: titleLine,
+                subtitle: subLine,
+                items: items,
+                onSelect: function (item) {
+                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
+                    if (item && typeof item.__cw_action === 'function') {
+                        safe('exitSummaryAction', function () { item.__cw_action(); });
+                    }
+                },
+                onBack: function () {
+                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
+                }
+            });
+        });
+    }
+
+    // Smart-next подтверждение: когда плагин решил «предыдущий эпизод
+    // фактически просмотрен (≥ SMART_NEXT_PCT %) → запускаем следующий», мы
+    // не делаем тихий прыжок, а спрашиваем юзера. Полезно когда юзер забыл
+    // досмотрел или нет, или хочет пересмотреть конец предыдущей серии.
+    function showSmartNextDialog(movie, target, btn, render) {
+        if (!Lampa.Select || !Lampa.Select.show) {
+            // Fallback: тихий прыжок если Select API недоступен.
+            launchPlayer(movie, target.params);
+            return;
+        }
+        var prev = target.fromParams;
+        var nxt  = target.params;
+        var prevTimeStr = prev && prev.time ? formatTime(prev.time) : '';
+        var prevDurStr  = prev && prev.duration ? formatTime(prev.duration) : '';
+        var prevTail    = prevTimeStr && prevDurStr ? prevTimeStr + ' / ' + prevDurStr : (prevTimeStr || '');
+
+        var items = [];
+        items.push({
+            title: 'Следующий: S' + nxt.season + ' E' + nxt.episode + ' (с начала)',
+            subtitle: 'продолжить просмотр сериала',
+            __cw_action: function () { launchPlayer(movie, cloneFresh(nxt), { startFresh: true }); }
+        });
+        if (prev) {
+            items.push({
+                title: 'Досмотреть S' + prev.season + ' E' + prev.episode +
+                    ' (' + target.fromPercent + '%' + (prevTail ? ' · ' + prevTail : '') + ')',
+                subtitle: 'вернуться к предыдущему с того же места',
+                __cw_action: function () { launchPlayer(movie, prev); }
+            });
+            var prevHash = generateHash(movie, prev.season, prev.episode);
+            items.push({
+                title: 'Пересмотреть S' + prev.season + ' E' + prev.episode + ' с начала',
+                __cw_action: function () { launchPlayer(movie, cloneFresh(prev), { startFresh: true }); }
+            });
+            items.push({
+                title: 'Отметить S' + prev.season + ' E' + prev.episode + ' как просмотренный и закрыть',
+                subtitle: 'не запускать ничего',
+                __cw_action: function () {
+                    markWatched(prevHash, prev);
+                    noty('Эпизод S' + prev.season + ' E' + prev.episode + ' помечен как просмотренный');
+                    refreshCardButton(movie, render, btn);
+                }
+            });
+        }
+        items.push({
+            title: 'Не спрашивать больше',
+            subtitle: 'отключить подтверждение и запустить следующий',
+            __cw_action: function () {
+                safe('cwSmartNextOff', function () { Lampa.Storage.set(SMART_NEXT_CONFIRM_KEY, false); });
+                launchPlayer(movie, cloneFresh(nxt), { startFresh: true });
+            }
+        });
+
+        var titleLine = prev
+            ? 'S' + prev.season + ' E' + prev.episode + ' просмотрен на ' + target.fromPercent + '%'
+            : 'Эпизод почти досмотрен';
+
+        safe('Select.show.smart-next', function () {
+            Lampa.Select.show({
+                title: titleLine,
+                subtitle: 'Что запустить?',
+                items: items,
+                onSelect: function (item) {
+                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
+                    if (item && typeof item.__cw_action === 'function') {
+                        safe('smartNextAction', function () { item.__cw_action(); });
+                    }
+                },
+                onBack: function () {
+                    safe('Controller.toggle', function () { Lampa.Controller.toggle('content'); });
+                }
+            });
+        });
+    }
+
+    function onClickContinue(movie, btn, render, target) {
         if (TIMERS.click) return;
-        var target = pickContinueTarget(movie);
+        target = target || pickContinueTarget(movie);
         if (!target) { noty('Нет истории'); return; }
         if (btn) $(btn).css('opacity', 0.5);
         TIMERS.click = setTimeout(function () {
             TIMERS.click = 0;
             if (btn) $(btn).css('opacity', 1);
         }, CLICK_DEBOUNCE_MS);
+
+        if (target.isNext && target.fromParams && smartNextConfirmEnabled()) {
+            showSmartNextDialog(movie, target, btn, render);
+            return;
+        }
         launchPlayer(movie, target.params);
     }
 
@@ -1840,12 +2181,12 @@
         if (view && view.percent > 0) { percent = view.percent; timeStr = formatTime(view.time); }
         else if (params.time) { percent = params.percent || 0; timeStr = formatTime(params.time); }
 
-        var label = 'Продолжить';
+        var label = target.isNext ? 'Следующий' : 'Продолжить';
         if (params.season && params.episode) label += ' S' + params.season + ' E' + params.episode;
         if (timeStr) label += ' <span class="cw-btn__time">(' + timeStr + ')</span>';
 
-        var btn = $(buildButtonHtml((percent * 65.97 / 100).toFixed(2), label));
-        btn.on('hover:enter', function () { onClickContinue(movie, this); });
+        var btn = $(buildButtonHtml((percent * 65.97 / 100).toFixed(2), label, !!target.isNext));
+        btn.on('hover:enter', function () { onClickContinue(movie, this, render, target); });
         btn.on('hover:long', function () { showContextMenu(movie, target, btn, render); });
 
         var anchor = injectButtonAt(render, btn);
@@ -1890,16 +2231,54 @@
         });
     }
 
+    // Lampa Android (форк lampa-app/LAMPA) для внешних плееров (ViMu, MX,
+    // DDD и др.) при возврате из плеера зовёт Lampa.Timeline.update(timeline)
+    // через WebView — это записывает 'file_view*' в Storage и триггерит
+    // 'change'-эвент. Lampa.Player.listener в этом сценарии не работает
+    // (см. https://github.com/yumata/lampa-source/issues/244), поэтому
+    // file_view-канал — самый надёжный сигнал «прогресс реально сохранён».
+    function isFileViewKey(name) {
+        if (typeof name !== 'string') return false;
+        return name === TIMELINE_STORE_KEY || name.indexOf(TIMELINE_STORE_KEY + '_') === 0;
+    }
+
+    function syncEntryFromFileView(hash) {
+        if (!hash) return false;
+        var fv = safe('fv.read', function () { return Lampa.Storage.get(TIMELINE_STORE_KEY, {}); }) || {};
+        var road = fv[hash];
+        if (!road || typeof road !== 'object') return false;
+        var pct = (typeof road.percent === 'number') ? road.percent : 0;
+        var t = road.time || 0;
+        var dur = road.duration || 0;
+        if (!pct && !t && !dur) return false;
+        if (!ensureEntryForLivePlayback(hash)) return false;
+        updateEntry(hash, { percent: pct, time: t, duration: dur });
+        return true;
+    }
+
+    function onFileViewChanged() {
+        var card = S.last_player_card || S.session_play_card || S.last_launched_card;
+        var h = S.last_player_hash || S.session_play_hash;
+        if (h) syncEntryFromFileView(h);
+        if (!card) return;
+        S.last_card_refresh_at = 0;
+        refreshActiveCardSoon(card, 'file_view changed');
+    }
+
     function attachStorageListener() {
         safe('storage listener', function () {
             Lampa.Storage.listener.follow('change', function (e) {
-                if (!e.name) return;
+                if (!e || !e.name) return;
                 if (typeof e.name === 'string' && e.name.indexOf('continue_watch_params') === 0) {
                     S.mem = null; S.title_index = null;
                 }
                 if (e.name === 'account') { S.mem = null; S.title_index = null; ensureSync(); migrateOld(); }
                 if (e.name === 'torrserver_url' || e.name === 'torrserver_url_two' || e.name === 'torrserver_use_link') {
                     S.ts_url = null;
+                }
+                if (isFileViewKey(e.name)) {
+                    log('storage change: ' + e.name + ' (file_view) — syncing progress');
+                    onFileViewChanged();
                 }
             });
         });
@@ -2045,7 +2424,16 @@
             mem ? (fmtBytes(mem.used) + ' / ' + fmtBytes(mem.total) + ' · limit ' + fmtBytes(mem.limit)) :
                 '<span style="opacity:.6">performance.memory недоступен в этом WebView</span>'));
 
-        body.append(row('Smart next-episode', 'порог: <b>' + SMART_NEXT_PCT + '%</b> · long-press на «Продолжить» — контекстное меню'));
+        body.append(row('Smart next-episode',
+            'порог: <b>' + SMART_NEXT_PCT + '%</b>' +
+            ' · подтверждение: ' + (smartNextConfirmEnabled() ? '<span style="color:#7c7">ВКЛ</span>' : '<span style="color:#f66">ВЫКЛ</span>') +
+            ' · long-press на «Продолжить» — контекстное меню' +
+            ' · <span style="opacity:.6">cw.smartNextConfirm(true|false)</span>'));
+        body.append(row('Уведомление при выходе',
+            (exitSummaryEnabled() ? '<span style="color:#7c7">ВКЛ</span>' : '<span style="color:#f66">ВЫКЛ</span>') +
+            ' · показывается один раз за сеанс плеера' +
+            (S.last_exit_summary_at ? ' · последнее: ' + new Date(S.last_exit_summary_at).toLocaleTimeString() : '') +
+            ' · <span style="opacity:.6">cw.exitSummary(true|false)</span>'));
         body.append(row('TorrServer add', 'magnet → infohash на клиенте + GET /stream?preload (simple CORS, без preflight); перед add в модалке — GET /echo health-check'));
 
         body.append('<div class="cw-diag__sect">Сохранённые записи</div>');
@@ -2095,6 +2483,9 @@
             '.button--continue-watch .cw-btn__ico{margin-right:.5em}' +
             '.button--continue-watch .cw-btn__ring{opacity:.5}' +
             '.button--continue-watch .cw-btn__time{opacity:.7;font-size:.9em;margin-left:.3em}' +
+            '.button--continue-watch .cw-btn__nextico{margin-right:.4em;vertical-align:-.1em;opacity:.85}' +
+            '.button--continue-watch--next .cw-btn__ring{stroke:#ffd166;opacity:.95}' +
+            '.button--continue-watch--next .cw-btn__ico{color:#ffd166}' +
             '.cw-buf{position:fixed;inset:0;background:rgba(0,0,0,.78);display:flex;align-items:center;justify-content:center;z-index:9999;padding:1em;font-size:1em}' +
             '.cw-buf__card{background:#1a1a1f;border-radius:1em;padding:1.6em 2em;min-width:38em;max-width:48em;box-shadow:0 12px 40px rgba(0,0,0,.6);color:#fff}' +
             '.cw-buf__head{display:flex;align-items:center;gap:1em;margin-bottom:1em}' +
@@ -2234,6 +2625,20 @@
                 if (typeof enabled !== 'undefined') Lampa.Storage.set(ECO_MODE_KEY, !!enabled);
                 console.log('[CW] eco cleanup:', ecoModeEnabled() ? 'ON' : 'OFF');
                 return { enabled: ecoModeEnabled(), cleanups: S.cleanup_count, last_reason: S.last_cleanup_reason };
+            },
+            smartNextConfirm: function (enabled) {
+                if (typeof enabled !== 'undefined') Lampa.Storage.set(SMART_NEXT_CONFIRM_KEY, !!enabled);
+                console.log('[CW] smart-next confirm:', smartNextConfirmEnabled() ? 'ON' : 'OFF');
+                return { enabled: smartNextConfirmEnabled(), threshold: SMART_NEXT_PCT };
+            },
+            exitSummary: function (enabled) {
+                if (typeof enabled !== 'undefined') Lampa.Storage.set(EXIT_SUMMARY_KEY, !!enabled);
+                console.log('[CW] exit summary:', exitSummaryEnabled() ? 'ON' : 'OFF');
+                return {
+                    enabled: exitSummaryEnabled(),
+                    last_at: S.last_exit_summary_at,
+                    last_hash: S.last_exit_summary_hash
+                };
             },
             cleanup: function (reason) {
                 cleanupRuntime(reason || 'manual');
