@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '120';
+    var PLUGIN_VERSION = '122';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -774,10 +774,11 @@
     // =========================================================================
     // 8. Плейлист эпизодов сериала (тихая догрузка в фоне)
     // =========================================================================
-    function loadEpisodesPlaylist(movie, currentParams, currentUrl, done) {
+    function loadEpisodesPlaylist(movie, currentParams, currentUrl, done, currentResumeTime) {
         var title = pickTitle(movie);
         var allParams = readParams();
         var playlist = [];
+        var hasResume = (typeof currentResumeTime === 'number' && currentResumeTime > 0);
 
         for (var hash in allParams) {
             var p = allParams[hash];
@@ -785,12 +786,19 @@
                 var epHash = generateHash(movie, p.season, p.episode);
                 var tl = Lampa.Timeline.view(epHash);
                 var isCur = (p.season === currentParams.season && p.episode === currentParams.episode);
+                var pos;
+                if (isCur) {
+                    pos = hasResume ? currentResumeTime : (tl ? (tl.time || -1) : -1);
+                    if (hasResume && tl) { tl.time = currentResumeTime; }
+                } else {
+                    pos = -1;
+                }
                 playlist.push({
                     title: p.episode_title || ('S' + p.season + ' E' + p.episode),
                     season: p.season, episode: p.episode,
                     timeline: tl, torrent_hash: p.torrent_hash || p.torrent_link,
                     card: movie, url: isCur ? currentUrl : buildStreamUrl(p),
-                    position: isCur ? (tl ? (tl.time || -1) : -1) : -1
+                    position: pos
                 });
             }
         }
@@ -831,13 +839,20 @@
                     }
 
                     var isCur = (info.season === currentParams.season && info.episode === currentParams.episode);
+                    var pos;
+                    if (isCur) {
+                        pos = hasResume ? currentResumeTime : (tl.time || -1);
+                        if (hasResume) tl.time = currentResumeTime;
+                    } else {
+                        pos = -1;
+                    }
                     playlist.push({
                         title: movie.number_of_seasons ? ('S' + info.season + ' E' + info.episode) : (movie.title || title),
                         season: info.season, episode: info.episode,
                         timeline: tl, torrent_hash: currentParams.torrent_link, card: movie,
                         url: (isCur || (file.id === currentParams.file_index && !movie.number_of_seasons)) ? currentUrl :
                             buildStreamUrl({ file_name: file.path, torrent_link: currentParams.torrent_link, file_index: file.id || 0 }),
-                        position: isCur ? (tl.time || -1) : -1
+                        position: pos
                     });
                     seen[key] = 1;
                 });
@@ -1424,12 +1439,14 @@
     // плеером — поэтому если изначально передать [current] + stub, плеер на
     // конце эпизода видит stub без url и закрывается. Поэтому собираем полный
     // плейлист до Lampa.Player.play.
-    function startPlayback(movie, params, url, timeline) {
+    function startPlayback(movie, params, url, timeline, opts) {
+        opts = opts || {};
         var player_type = Lampa.Storage.field('player_torrent');
         var force_inner = (player_type === 'inner');
         var isSeries = !!(movie.number_of_seasons && params.season && params.episode);
-        log('startPlayback player_type=' + player_type + ' position=' + (timeline.time || -1) +
-            ' series=' + isSeries);
+        var resumeTime = (typeof opts.resumeTime === 'number') ? opts.resumeTime : (timeline.time || 0);
+        log('startPlayback player_type=' + player_type + ' position=' + (resumeTime || -1) +
+            ' series=' + isSeries + ' singleEpisode=' + !!opts.singleEpisode);
 
         var data = {
             url: url,
@@ -1437,7 +1454,7 @@
             card: movie, torrent_hash: params.torrent_link,
             timeline: timeline,
             season: params.season, episode: params.episode,
-            position: timeline.time || -1
+            position: resumeTime || -1
         };
 
         if (force_inner) {
@@ -1454,12 +1471,13 @@
         var fallbackPlaylist = [{
             url: url, title: epTitle, timeline: timeline,
             season: params.season, episode: params.episode,
-            card: movie, torrent_hash: params.torrent_link
+            card: movie, torrent_hash: params.torrent_link,
+            position: resumeTime || -1
         }];
 
         var doPlay = function (playlist) {
             data.playlist = (playlist && playlist.length) ? playlist : fallbackPlaylist;
-            if (timeline.time > 0) noty('Восстанавливаем: ' + formatTime(timeline.time));
+            if (resumeTime > 0) noty('Восстанавливаем: ' + formatTime(resumeTime));
             var epHash = generateHash(movie, params.season, params.episode);
             if (epHash) {
                 S.session_play_hash = epHash;
@@ -1471,11 +1489,19 @@
             log('player started, playlist=' + data.playlist.length + ' items');
         };
 
-        if (!isSeries) { doPlay(fallbackPlaylist); return; }
+        if (!isSeries || opts.singleEpisode) {
+            // singleEpisode: юзер выбрал «Досмотреть текущий» в smart-next confirm.
+            // Без playlist'а Lampa.Player не сможет авто-перепрыгнуть на следующую
+            // серию когда мы сразу подходим к концу (это и происходило, юзер думал
+            // что серия запустилась заново — на самом деле плеер за 2 сек добегал
+            // до конца и переходил на S+1 из playlist'а).
+            doPlay(fallbackPlaylist);
+            return;
+        }
 
         if (S.files[params.torrent_link]) {
             log('using cached files for playlist (' + S.files[params.torrent_link].length + ')');
-            buildPlaylistFromFiles(movie, params, url, S.files[params.torrent_link], doPlay);
+            buildPlaylistFromFiles(movie, params, url, S.files[params.torrent_link], doPlay, resumeTime);
             return;
         }
 
@@ -1498,13 +1524,14 @@
             played = true;
             clearTimeout(startTimeout);
             doPlay(playlist && playlist.length ? playlist : fallbackPlaylist);
-        });
+        }, resumeTime);
     }
 
-    function buildPlaylistFromFiles(movie, currentParams, currentUrl, files, done) {
+    function buildPlaylistFromFiles(movie, currentParams, currentUrl, files, done, currentResumeTime) {
         var title = pickTitle(movie);
         var playlist = [];
         var allParams = readParams();
+        var hasResume = (typeof currentResumeTime === 'number' && currentResumeTime > 0);
 
         for (var i = 0; i < files.length; i++) {
             var file = files[i];
@@ -1530,13 +1557,20 @@
                 }
 
                 var isCur = (info.season === currentParams.season && info.episode === currentParams.episode);
+                var pos;
+                if (isCur) {
+                    pos = hasResume ? currentResumeTime : (tl.time || -1);
+                    if (hasResume) tl.time = currentResumeTime;
+                } else {
+                    pos = -1;
+                }
                 playlist.push({
                     title: movie.number_of_seasons ? ('S' + info.season + ' E' + info.episode) : (movie.title || title),
                     season: info.season, episode: info.episode,
                     timeline: tl, torrent_hash: currentParams.torrent_link, card: movie,
                     url: isCur ? currentUrl :
                         buildStreamUrl({ file_name: file.path, torrent_link: currentParams.torrent_link, file_index: file.id || 0 }),
-                    position: isCur ? (tl.time || -1) : -1
+                    position: pos
                 });
             });
         }
@@ -1560,8 +1594,25 @@
         if (opts.startFresh) {
             timeline = { hash: hash, time: 0, percent: 0, duration: existingDuration };
             updateEntry(hash, { percent: 0, time: 0 });
+        } else if (typeof opts.resumeTime === 'number') {
+            // Явное резюме (smart-next «Продолжить досмотренный»): берём
+            // указанную позицию, percent — из Lampa.Timeline или params.
+            // Если позиция в пределах 5с от конца — отступаем, чтобы плеер
+            // не закрывался мгновенно.
+            var lampaView0 = safe('Timeline.view', function () { return Lampa.Timeline.view(hash); }) || null;
+            var resumeT = opts.resumeTime;
+            if (existingDuration > 0 && resumeT > 0 && resumeT > existingDuration - 5) {
+                resumeT = Math.max(0, existingDuration - 5);
+            }
+            timeline = lampaView0 || { hash: hash };
+            timeline.time = resumeT;
+            timeline.percent = (lampaView0 && lampaView0.percent > 0) ? lampaView0.percent : (params.percent || 0);
+            timeline.duration = existingDuration;
+            updateEntry(hash, { percent: timeline.percent, time: timeline.time, duration: timeline.duration });
         } else {
-            timeline = Lampa.Timeline.view(hash);
+            // Обычный путь (как было до v121): доверяем Lampa.Timeline,
+            // params.time используем как fallback / как "обогнал" лампу.
+            timeline = safe('Timeline.view', function () { return Lampa.Timeline.view(hash); });
             if (!timeline || (!timeline.time && !timeline.percent)) {
                 timeline = timeline || { hash: hash };
                 timeline.time = params.time || 0;
@@ -1574,7 +1625,7 @@
             updateEntry(hash, { percent: timeline.percent, time: timeline.time, duration: timeline.duration });
         }
 
-        var go = function () { startPlayback(movie, params, url, timeline); };
+        var go = function () { startPlayback(movie, params, url, timeline, opts); };
 
         if (bufferingEnabled() && params.torrent_link && torrUrl()) {
             showBufferModal({
@@ -2088,6 +2139,16 @@
         var ep   = (prev.season && prev.episode) ? ('S' + prev.season + ' E' + prev.episode) : '';
         var nep  = (nxt.season  && nxt.episode)  ? ('S' + nxt.season  + ' E' + nxt.episode)  : '';
 
+        // Снимаем актуальную позицию из НАШЕГО storage + Lampa.Timeline в момент клика.
+        // Lampa мог обнулить time при ended (percent=100, time=0) — берём максимум,
+        // чтобы при выборе «Продолжить» резюмить именно с реальной позиции, а не с 0.
+        var prevHash = generateHash(movie, prev.season, prev.episode);
+        var resumeFor = function () {
+            var fresh = readParams()[prevHash] || prev;
+            var lampa = safe('Timeline.view', function () { return Lampa.Timeline.view(prevHash); }) || {};
+            return Math.max(fresh.time || 0, lampa.time || 0);
+        };
+
         showCenterConfirm({
             title: 'Эпизод ' + ep + ' просмотрен на ' + target.currentPercent + '%',
             subtitle: 'Перейти к следующему эпизоду?',
@@ -2097,7 +2158,11 @@
             },
             secondary: {
                 label: 'Продолжить ' + ep,
-                onPick: function () { launchPlayer(movie, prev); }
+                onPick: function () {
+                    var t = resumeFor();
+                    log('smart-next: resume "' + ep + '" at ' + t + 's');
+                    launchPlayer(movie, prev, { resumeTime: t, singleEpisode: true });
+                }
             },
             footer: {
                 label: 'Не спрашивать больше',
