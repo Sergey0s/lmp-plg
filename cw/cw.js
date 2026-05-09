@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '132';
+    var PLUGIN_VERSION = '133';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3762,7 +3762,7 @@
       var hashLabel = S.prefetch_hash
         ? S.prefetch_hash.slice(0, 16) + '…'
         : '<span style="opacity:.6">нет</span>';
-      var entry = (function () {
+      var matchedEntry = (function () {
         var p = readParams();
         var ix = S.title_index || buildIndex();
         for (var t in ix) {
@@ -3782,10 +3782,10 @@
         return null;
       })();
       var epLabel =
-        entry && entry.season
-          ? '"' + entry.title + '" S' + entry.season + ' E' + entry.episode
-          : entry
-          ? '"' + entry.title + '"'
+        matchedEntry && matchedEntry.season
+          ? '"' + matchedEntry.title + '" S' + matchedEntry.season + ' E' + matchedEntry.episode
+          : matchedEntry
+          ? '"' + matchedEntry.title + '"'
           : '<span style="opacity:.6">не привязан к нашей записи</span>';
       body.append(
         row(
