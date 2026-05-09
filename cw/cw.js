@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-  var PLUGIN_VERSION = '130';
+    var PLUGIN_VERSION = '131';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3369,10 +3369,20 @@
   // =========================================================================
   // 15. Экран диагностики (Lampa.Component)
   // =========================================================================
-  function DiagComponent() {
-    var outer = $('<div class="cw-diag"></div>');
-    var body = $('<div class="cw-diag__scroll"></div>');
-    var focusIndex = 0;
+    function DiagComponent(object) {
+      var activity = (object && object.activity) || null;
+      var outer = $('<div class="cw-diag"></div>');
+      var body = $('<div class="cw-diag__scroll"></div>');
+      var focusIndex = 0;
+
+      function dismissEmpty() {
+        try {
+          if (activity && activity.loader) activity.loader(false);
+        } catch (e) {}
+        try {
+          if (activity && activity.toggle) activity.toggle();
+        } catch (e) {}
+      }
 
     function row(label, value, accent) {
       return $(
@@ -3461,12 +3471,13 @@
       );
     }
 
-    this.create = function () {};
+    this.create = function () { dismissEmpty(); };
     this.render = function () {
       return outer;
     };
 
     this.start = function () {
+      dismissEmpty();
       safe('bg', function () {
         Lampa.Background.immediately(Lampa.Utils.cardImgBackground({img: ''}));
       });
