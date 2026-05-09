@@ -1,0 +1,720 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const pluginPath = path.join(__dirname, 'cw.js');
+const code = fs.readFileSync(pluginPath, 'utf8');
+
+class MiniQuery {
+  constructor(nodes, label) {
+    this.nodes = Array.isArray(nodes) ? nodes : nodes ? [nodes] : [];
+    this.length = this.nodes.length;
+    this.label = label || '';
+    for (let i = 0; i < this.nodes.length; i++) this[i] = this.nodes[i];
+  }
+
+  append(value) {
+    const add = value instanceof MiniQuery ? value.nodes : [value];
+    this.nodes.forEach((node) => {
+      node.children = node.children || [];
+      add.forEach((item) => {
+        if (item && item.__miniNode) node.children.push(item);
+        else {
+          const html = String(item || '');
+          node.html = (node.html || '') + html;
+          node.selectorCount = (node.selectorCount || 0) + countSelectors(html);
+        }
+      });
+    });
+    return this;
+  }
+
+  appendTo() { return this; }
+  prepend(value) { return this.append(value); }
+  before(value) {
+    this.nodes.forEach((node) => {
+      const parent = node.parent;
+      if (!parent) return;
+      const add = value instanceof MiniQuery ? value.nodes : [value];
+      add.forEach((item) => {
+        if (item && item.__miniNode) {
+          item.parent = parent;
+          item.isConnected = true;
+          parent.children.unshift(item);
+        }
+      });
+    });
+    return this;
+  }
+  remove() {
+    this.nodes.forEach((n) => {
+      n.removed = true;
+      if (n.parent && n.parent.children) {
+        n.parent.children = n.parent.children.filter((child) => child !== n);
+      }
+    });
+    return this;
+  }
+  empty() { this.nodes.forEach((n) => { n.children = []; n.html = ''; n.selectorCount = 0; }); return this; }
+  css() { return this; }
+  hasClass(name) { return !!(this.nodes[0] && this.nodes[0].classes && this.nodes[0].classes[name]); }
+  on(event, selectorOrHandler, handler) {
+    this.nodes.forEach((n) => {
+      n.handlers = n.handlers || {};
+      n.handlers[event] = handler || selectorOrHandler;
+    });
+    return this;
+  }
+  trigger(event) {
+    this.nodes.forEach((n) => {
+      if (n.handlers && typeof n.handlers[event] === 'function') n.handlers[event].call(n);
+    });
+    return this;
+  }
+  eq(i) { return new MiniQuery(this.nodes[i] ? [this.nodes[i]] : [], this.label + '.eq'); }
+  first() { return this.eq(0); }
+  find(selector) {
+    if (selector !== '.selector') {
+      const found = [];
+      this.nodes.forEach((node) => collectBySelector(node, selector, found));
+      return new MiniQuery(found, selector);
+    }
+    const total = this.nodes.reduce((sum, n) => sum + (n.selectorCount || 0), 0);
+    const nodes = [];
+    for (let i = 0; i < total; i++) {
+      nodes.push({
+        __miniNode: true,
+        index: i,
+        offsetTop: i * 28,
+        offsetHeight: 28,
+        classes: {},
+      });
+    }
+    return new MiniQuery(nodes, selector);
+  }
+  addClass(name) { this.nodes.forEach((n) => { n.classes = n.classes || {}; n.classes[name] = true; }); return this; }
+  removeClass(name) { this.nodes.forEach((n) => { if (n.classes) delete n.classes[name]; }); return this; }
+  scrollTop(value) {
+    if (typeof value === 'undefined') return this.nodes[0] ? (this.nodes[0].scrollTop || 0) : 0;
+    this.nodes.forEach((n) => { n.scrollTop = value; });
+    return this;
+  }
+  innerHeight() { return 720; }
+}
+
+function collectBySelector(node, selector, out) {
+  if (!node || node.removed) return;
+  const selectors = String(selector).split(',').map((s) => s.trim()).filter(Boolean);
+  const children = node.children || [];
+  children.forEach((child) => {
+    if (child.removed) return;
+    if (selectors.some((s) => matchesSelector(child, s))) out.push(child);
+    collectBySelector(child, selector, out);
+  });
+}
+
+function matchesSelector(node, selector) {
+  if (!node || !selector) return false;
+  if (selector.charAt(0) === '.') return !!(node.classes && node.classes[selector.slice(1)]);
+  if (selector.indexOf('[data-') === 0) return false;
+  return false;
+}
+
+function countSelectors(html) {
+  return (String(html).match(/\bselector\b/g) || []).length;
+}
+
+function nodeFromHtml(html) {
+  const classes = {};
+  const classMatch = String(html || '').match(/class="([^"]+)"/);
+  if (classMatch) classMatch[1].split(/\s+/).forEach((c) => { if (c) classes[c] = true; });
+  return {
+    __miniNode: true,
+    html: String(html || ''),
+    children: [],
+    handlers: {},
+    classes,
+    selectorCount: countSelectors(html),
+    offsetTop: 0,
+    offsetHeight: 28,
+    isConnected: false,
+  };
+}
+
+const menuList = nodeFromHtml('<div class="menu__list"></div>');
+
+function $(arg) {
+  if (arg instanceof MiniQuery) return arg;
+  if (arg && arg.__miniNode) return new MiniQuery([arg]);
+  if (typeof arg === 'string' && arg.trim().charAt(0) === '<') return new MiniQuery([nodeFromHtml(arg)]);
+  if (arg === 'head' || arg === 'body') return new MiniQuery([nodeFromHtml(arg)]);
+  if (arg === '.menu .menu__list') return new MiniQuery([menuList]);
+  if (String(arg).indexOf('.menu .menu__item') === 0) return new MiniQuery([]);
+  return new MiniQuery([]);
+}
+
+const listeners = {};
+const components = {};
+const storage = {
+  continue_watch_params: makeEntries(123),
+  torrserver_url: 'http://192.168.31.244:8090',
+  player_torrent: 'inner',
+  cw_buffer_modal: false,
+};
+let activeActivity = {component: 'main', movie: null};
+let controllerName = '';
+let startCalls = 0;
+let noties = [];
+let playerPlayCalls = [];
+let xhrRequests = [];
+const timelineStore = {};
+
+const Lampa = {
+  Storage: {
+    get(key, def) { return Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : def; },
+    set(key, value) {
+      storage[key] = value;
+      (listeners['storage:change'] || []).forEach((cb) => cb({name: key, value}));
+    },
+    field(key) { return storage[key]; },
+    sync() {},
+    listener: {follow(event, cb) { (listeners['storage:' + event] ||= []).push(cb); }},
+  },
+  Listener: {
+    follow(event, cb) { (listeners[event] ||= []).push(cb); },
+    send(event, payload) { (listeners[event] || []).forEach((cb) => cb(payload)); },
+  },
+  Component: {
+    add(name, component) { components[name] = component; },
+  },
+  Activity: {
+    active() { return activeActivity; },
+    push(object) { return openComponent(object.component, object); },
+    replace(object) { return openComponent(object.component, object); },
+    backward() {},
+  },
+  Controller: {
+    add(name, cfg) { this.controllers[name] = cfg; },
+    controllers: {},
+    toggle(name) {
+      controllerName = name;
+      const cfg = this.controllers[name];
+      if (cfg && cfg.toggle) cfg.toggle();
+    },
+    enabled() { return {name: controllerName || 'content'}; },
+    clear() {},
+  },
+  Noty: {
+    show(text) { noties.push(String(text)); },
+  },
+  Utils: {
+    hash(value) {
+      let h = 0;
+      const s = String(value || '');
+      for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+      return String(Math.abs(h));
+    },
+    cardImgBackground() { return {img: ''}; },
+  },
+  Background: {immediately() {}, change() {}},
+  Player: {
+    play(data) { playerPlayCalls.push(data); },
+    callback() {},
+    playlist() {},
+    listener: {
+      follow(event, cb) { (listeners['player:' + event] ||= []).push(cb); },
+      remove(event, cb) {
+        listeners['player:' + event] = (listeners['player:' + event] || []).filter((x) => x !== cb);
+      },
+    },
+  },
+  Timeline: {
+    listener: {
+      follow(event, cb) { (listeners['timeline:' + event] ||= []).push(cb); },
+    },
+    view(hash) { return timelineStore[hash] || {}; },
+    update(data) {
+      if (data && data.hash) timelineStore[data.hash] = Object.assign({}, timelineStore[data.hash] || {}, data);
+      (listeners['timeline:update'] || []).forEach((cb) => cb({data: {hash: data.hash, road: data}}));
+    },
+  },
+  Torserver: {
+    parse(opts) {
+      const file = opts && opts.files && opts.files[0];
+      const name = (file && file.path) || '';
+      const m = name.match(/S(\d+)\s*E(\d+)/i);
+      return {
+        season: m ? Number(m[1]) : 1,
+        episode: m ? Number(m[2]) : 1,
+      };
+    },
+    files(hash, ok) {
+      ok({
+        file_stats: [
+          {id: 1, path: 'Smoke AutoNext Series S01 E01.mkv'},
+          {id: 2, path: 'Smoke AutoNext Series S01 E02.mkv'},
+        ],
+      });
+    },
+  },
+  Platform: {is() { return false; }},
+  Account: {Permit: {sync: false}},
+  Manifest: {plugins: []},
+  Template: {js() { return nodeFromHtml('<div></div>'); }},
+};
+
+const sandbox = {
+  window: {
+    appready: true,
+    Lampa,
+    addEventListener() {},
+    requestAnimationFrame(fn) { return fn(); },
+  setTimeout(fn, ms) {
+    if (ms === 1000) return fn();
+    if (ms <= 100) return fn();
+    if (ms >= 500) return 0;
+    return setTimeout(fn, ms);
+  },
+    clearTimeout,
+    setInterval() { return 0; },
+    clearInterval() {},
+    performance: {memory: {usedJSHeapSize: 10_000_000, totalJSHeapSize: 10_000_000, jsHeapSizeLimit: 1_000_000_000}},
+  },
+  document: {
+    body: {appendChild() {}},
+    createElement() { return {style: {}, children: [], appendChild() {}, remove() {}}; },
+    getElementById() { return null; },
+    addEventListener() {},
+    documentElement: {},
+  },
+  Lampa,
+  $,
+  console,
+  requestAnimationFrame(fn) { return fn(); },
+  setTimeout(fn, ms) {
+    if (ms === 1000) return fn();
+    if (ms <= 100) return fn();
+    if (ms >= 500) return 0;
+    return setTimeout(fn, ms);
+  },
+  clearTimeout,
+  setInterval() { return 0; },
+  clearInterval() {},
+  performance: {now: () => Date.now(), memory: {usedJSHeapSize: 10_000_000, totalJSHeapSize: 10_000_000, jsHeapSizeLimit: 1_000_000_000}},
+  MutationObserver: function () { this.observe = function () {}; this.disconnect = function () {}; },
+  XMLHttpRequest: MockXMLHttpRequest,
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+sandbox.window.console = console;
+sandbox.window.performance = sandbox.performance;
+
+function makeEntries(count) {
+  const out = {};
+  for (let i = 0; i < count; i++) {
+    out['hash-' + i] = {
+      title: i % 2 ? 'Prison Break' : 'Универ. Молодые',
+      season: 2,
+      episode: i + 1,
+      percent: 40 + (i % 60),
+      time: 1200 + i,
+      duration: 2400,
+      timestamp: Date.now() - i * 1000,
+    torrent_link: 'magnet:?xt=urn:btih:' + String(i).padStart(40, 'a').slice(0, 40),
+      file_index: i,
+    };
+  }
+  return out;
+}
+
+function makeCardRender() {
+  const root = nodeFromHtml('<div class="full"></div>');
+  const buttons = nodeFromHtml('<div class="full-start__buttons"></div>');
+  buttons.parent = root;
+  buttons.isConnected = true;
+  root.children.push(buttons);
+  return new MiniQuery([root], 'card-render');
+}
+
+function MockXMLHttpRequest() {
+  this.headers = {};
+  this.status = 200;
+  this.responseText = '';
+  this.timeout = 0;
+}
+
+MockXMLHttpRequest.prototype.open = function (method, url) {
+  this.method = method;
+  this.url = url;
+};
+
+MockXMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+  this.headers[name] = value;
+};
+
+MockXMLHttpRequest.prototype.send = function (body) {
+  xhrRequests.push({method: this.method, url: this.url, body: body || ''});
+  if (this.method === 'POST' && /\/torrents$/.test(this.url)) {
+    let payload = {};
+    try { payload = body ? JSON.parse(body) : {}; } catch (e) {}
+    if (payload.action === 'get') {
+      this.responseText = JSON.stringify({
+        preloaded_bytes: 10,
+        preload_size: 100,
+        download_speed: 2048,
+      });
+    } else {
+      this.responseText = JSON.stringify({hash: '0123456789abcdef0123456789abcdef01234567'});
+    }
+  }
+  if (typeof this.onload === 'function') this.onload();
+};
+
+function addMovieContinueEntry(title) {
+  const hash = Lampa.Utils.hash(title);
+  storage.continue_watch_params[hash] = {
+    title,
+    percent: 44,
+    time: 1234,
+    duration: 3600,
+    timestamp: Date.now() + 1000,
+    torrent_link: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+    file_name: 'Movie Test.mkv',
+    file_index: 0,
+  };
+  notifyContinueStorageChanged();
+  return hash;
+}
+
+function addSeriesEntry(title, season, episode, overrides) {
+  const hash = Lampa.Utils.hash([season, episode, title].join(''));
+  storage.continue_watch_params[hash] = Object.assign({
+    title,
+    season,
+    episode,
+    percent: 0,
+    time: 0,
+    duration: 2400,
+    timestamp: Date.now(),
+    torrent_link: 'magnet:?xt=urn:btih:abcdefabcdefabcdefabcdefabcdefabcdefabcd',
+    file_name: `${title} S${String(season).padStart(2, '0')} E${String(episode).padStart(2, '0')}.mkv`,
+    file_index: episode,
+  }, overrides || {});
+  notifyContinueStorageChanged();
+  return storage.continue_watch_params[hash];
+}
+
+function notifyContinueStorageChanged() {
+  (listeners['storage:change'] || []).forEach((cb) => cb({
+    name: 'continue_watch_params',
+    value: storage.continue_watch_params,
+  }));
+}
+
+function seriesHash(title, season, episode) {
+  return Lampa.Utils.hash([season, episode, title].join(''));
+}
+
+function sendPlayerStart(data) {
+  (listeners['player:start'] || []).forEach((cb) => cb(data));
+}
+
+function sendPlayerDestroy() {
+  (listeners['player:destroy'] || []).forEach((cb) => cb());
+}
+
+function openComponent(name, object) {
+  const Component = components[name];
+  if (!Component) throw new Error('Component not registered: ' + name);
+  startCalls = 0;
+  const component = new Component(object || {component: name});
+  const activity = {
+    is_started: false,
+    loader() {},
+    toggle() {
+      if (this.is_started) {
+        startCalls++;
+        if (startCalls > 5) throw new Error('recursive activity.toggle/start detected');
+        component.start();
+      }
+    },
+  };
+  component.activity = activity;
+
+  const t0 = Date.now();
+  component.create(nodeFromHtml('<div class="activity__body"></div>'));
+  component.render(true);
+  activity.is_started = true;
+  component.start();
+  const elapsed = Date.now() - t0;
+
+  if (elapsed > 1000) throw new Error('diagnostics open too slow: ' + elapsed + 'ms');
+  return {component, elapsed};
+}
+
+vm.createContext(sandbox);
+vm.runInContext(code, sandbox, {filename: pluginPath});
+
+if (!components.continue_watch_diag) {
+  throw new Error('Diag component was not registered');
+}
+
+for (let i = 0; i < 3; i++) {
+  activeActivity = {
+    component: i ? 'full' : 'main',
+    movie: i ? {title: 'Универ. Молодые', name: 'Универ. Молодые', number_of_seasons: 2} : null,
+  };
+  const result = openComponent('continue_watch_diag', {
+    component: 'continue_watch_diag',
+    title: 'Продолжить · диагностика smoke',
+    movie: activeActivity.movie,
+  });
+  console.log(`open #${i + 1}: ${result.elapsed}ms`);
+}
+
+const continueTitle = 'Smoke Continue Movie';
+addMovieContinueEntry(continueTitle);
+const movie = {title: continueTitle, name: continueTitle};
+const render = makeCardRender();
+activeActivity = {component: 'full', movie, activity: {render: () => render}};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie},
+  object: activeActivity,
+});
+
+const btn = render.find('.button--continue-watch').first();
+if (!btn.length) throw new Error('Continue button was not injected');
+if (!/Продолжить/.test(btn.nodes[0].html || '')) {
+  throw new Error('Continue button label is missing');
+}
+
+playerPlayCalls = [];
+btn.trigger('hover:enter');
+if (playerPlayCalls.length !== 1) {
+  throw new Error('Continue click did not start player, calls=' + playerPlayCalls.length);
+}
+
+const play = playerPlayCalls[0];
+if (play.card !== movie) throw new Error('Player.play received wrong card');
+if (!play.url || play.url.indexOf('/stream') === -1) throw new Error('Player.play URL is invalid: ' + play.url);
+if (play.position !== 1234) throw new Error('Player.play position should resume from 1234, got ' + play.position);
+console.log('continue button OK:', play.position, play.url.slice(0, 32) + '...');
+
+const beforeExternalLabel = btn.nodes[0].html || '';
+if (beforeExternalLabel.indexOf('20:34') === -1) {
+  throw new Error('Initial continue button should show 20:34, got: ' + beforeExternalLabel);
+}
+const continueHash = Lampa.Utils.hash(continueTitle);
+
+// Реальный Android TV кейс: после возврата из внешнего плеера DOM карточки
+// остаётся на экране, но Lampa.Activity.active() может временно указывать не
+// на full activity. Кнопка всё равно должна обновиться через cached render из
+// full:complite.
+activeActivity = {component: 'main'};
+storage.file_view_756763 = Object.assign({}, storage.file_view_756763 || {}, {
+  [continueHash]: {
+    hash: continueHash,
+    percent: 57,
+    time: 2050,
+    duration: 3600,
+  },
+});
+Lampa.Storage.set('file_view_756763', storage.file_view_756763);
+
+const refreshedBtn = render.find('.button--continue-watch').first();
+if (!refreshedBtn.length) throw new Error('Continue button disappeared after file_view refresh');
+const refreshedLabel = refreshedBtn.nodes[0].html || '';
+if (refreshedLabel.indexOf('34:10') === -1) {
+  throw new Error('Continue button should refresh to 34:10 after external player, got: ' + refreshedLabel);
+}
+const refreshedEntry = storage.continue_watch_params[continueHash];
+if (!refreshedEntry || refreshedEntry.time !== 2050 || refreshedEntry.percent !== 57) {
+  throw new Error('External file_view progress was not saved: ' + JSON.stringify(refreshedEntry));
+}
+console.log('external refresh OK:', '20:34 -> 34:10');
+
+const prefetchTitle = 'Smoke Prefetch Series';
+addSeriesEntry(prefetchTitle, 2, 12, {
+  percent: 99,
+  time: 2300,
+  file_index: 12,
+  timestamp: Date.now() + 5000,
+});
+const nextPrefetchEntry = addSeriesEntry(prefetchTitle, 2, 13, {
+  percent: 0,
+  time: 0,
+  file_index: 13,
+  timestamp: Date.now() + 4000,
+});
+const prefetchMovie = {title: prefetchTitle, name: prefetchTitle, number_of_seasons: 2};
+const cw = sandbox.window.cw;
+if (!cw || typeof cw.prefetch !== 'function') throw new Error('cw.prefetch API is missing');
+cw.prefetch(false);
+cw.prefetch(true, 5);
+
+xhrRequests = [];
+const prefetchBefore = cw.prefetch().count;
+const prefetchRender = makeCardRender();
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: prefetchMovie},
+  object: {activity: {render: () => prefetchRender}},
+});
+
+const prefetchState = cw.prefetch();
+if (prefetchState.count !== prefetchBefore + 1) {
+  throw new Error(`Prefetch should start once, before=${prefetchBefore} after=${prefetchState.count}`);
+}
+if (prefetchState.last_index !== 13) {
+  throw new Error('Prefetch should target next episode file_index=13, got ' + prefetchState.last_index);
+}
+if (prefetchState.last_pct !== 10 || !prefetchState.target_reached) {
+  throw new Error('Prefetch polling did not update pct/reached: ' + JSON.stringify(prefetchState));
+}
+const preloadReq = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+if (!preloadReq || preloadReq.url.indexOf('index=13') === -1 || preloadReq.url.indexOf('preload') === -1) {
+  throw new Error('Prefetch preload request should use next index=13, got ' + (preloadReq && preloadReq.url));
+}
+
+xhrRequests = [];
+const sameTargetRender = makeCardRender();
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: prefetchMovie},
+  object: {activity: {render: () => sameTargetRender}},
+});
+const sameTargetState = cw.prefetch();
+if (sameTargetState.count !== prefetchState.count) {
+  throw new Error('Prefetch should skip same link+index after target reached');
+}
+if (xhrRequests.some((r) => r.method === 'GET' && /\/stream\//.test(r.url))) {
+  throw new Error('Prefetch should not trigger preload again for same link+index');
+}
+
+nextPrefetchEntry.file_index = 14;
+xhrRequests = [];
+const changedIndexRender = makeCardRender();
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: prefetchMovie},
+  object: {activity: {render: () => changedIndexRender}},
+});
+const changedIndexState = cw.prefetch();
+if (changedIndexState.count !== prefetchState.count + 1 || changedIndexState.last_index !== 14) {
+  throw new Error('Prefetch should restart when file_index changes in same torrent: ' + JSON.stringify(changedIndexState));
+}
+const changedIndexPreload = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+if (!changedIndexPreload || changedIndexPreload.url.indexOf('index=14') === -1) {
+  throw new Error('Changed-index prefetch should call preload with index=14');
+}
+console.log('prefetch OK:', changedIndexState.last_index, changedIndexState.last_pct + '%');
+
+const autoNextTitle = 'Smoke AutoNext Series';
+const autoNextMovie = {title: autoNextTitle, name: autoNextTitle, number_of_seasons: 1};
+addSeriesEntry(autoNextTitle, 1, 1, {
+  percent: 30,
+  time: 700,
+  file_index: 1,
+  timestamp: Date.now() + 9000,
+});
+addSeriesEntry(autoNextTitle, 1, 2, {
+  percent: 0,
+  time: 0,
+  file_index: 2,
+  timestamp: Date.now() + 8000,
+});
+const autoRender = makeCardRender();
+playerPlayCalls = [];
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: autoNextMovie},
+  object: {activity: {render: () => autoRender}},
+});
+const autoBtn = autoRender.find('.button--continue-watch').first();
+if (!autoBtn.length) throw new Error('Auto-next continue button was not injected');
+autoBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 1) throw new Error('Auto-next continue click did not start player');
+
+const h1 = seriesHash(autoNextTitle, 1, 1);
+const h2 = seriesHash(autoNextTitle, 1, 2);
+sendPlayerStart({
+  card: autoNextMovie,
+  season: 1,
+  episode: 1,
+  url: 'http://192.168.31.244:8090/stream/S01E01.mkv?link=magnet-one&index=1&play',
+});
+Lampa.Timeline.update({hash: h1, percent: 35, time: 800, duration: 2400});
+
+sendPlayerStart({
+  card: autoNextMovie,
+  season: 1,
+  episode: 2,
+  url: 'http://192.168.31.244:8090/stream/S01E02.mkv?link=magnet-one&index=2&play',
+});
+Lampa.Timeline.update({hash: h2, percent: 3, time: 75, duration: 2400});
+
+const afterAutoNext = storage.continue_watch_params[h2];
+if (!afterAutoNext) throw new Error('Auto-next episode entry was not saved');
+if (afterAutoNext.season !== 1 || afterAutoNext.episode !== 2) {
+  throw new Error('Auto-next episode metadata was not preserved: ' + JSON.stringify(afterAutoNext));
+}
+if (afterAutoNext.percent !== 3 || afterAutoNext.time !== 75 || afterAutoNext.duration !== 2400) {
+  throw new Error('Auto-next first timeline tick was not saved: ' + JSON.stringify(afterAutoNext));
+}
+if (afterAutoNext.file_index !== 2) {
+  throw new Error('Auto-next player_start did not update file_index=2: ' + JSON.stringify(afterAutoNext));
+}
+sendPlayerDestroy();
+console.log('auto-next timeline OK:', afterAutoNext.percent + '%', afterAutoNext.time + 's');
+
+const duplicateTitle = 'Smoke Duplicate Series';
+addSeriesEntry(duplicateTitle, 2, 4, {
+  percent: 93,
+  time: 2200,
+  file_index: 4,
+  timestamp: Date.now() + 9000,
+});
+const staleDupHash = 'manual-stale-duplicate-s2e5';
+storage.continue_watch_params[staleDupHash] = {
+  title: duplicateTitle,
+  season: 2,
+  episode: 5,
+  percent: 10,
+  time: 100,
+  duration: 2400,
+  file_index: 5,
+  file_name: `${duplicateTitle} S02 E05 stale.mkv`,
+  torrent_link: 'magnet:?xt=urn:btih:abcdefabcdefabcdefabcdefabcdefabcdefabcd',
+  timestamp: Date.now() + 1000,
+};
+addSeriesEntry(duplicateTitle, 2, 5, {
+  percent: 0,
+  time: 0,
+  file_index: 55,
+  file_name: `${duplicateTitle} S02 E05 fresh.mkv`,
+  timestamp: Date.now() + 8000,
+});
+notifyContinueStorageChanged();
+const duplicateRender = makeCardRender();
+const duplicateMovie = {title: duplicateTitle, name: duplicateTitle, number_of_seasons: 2};
+activeActivity = {component: 'full', movie: duplicateMovie, activity: {render: () => duplicateRender}};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: duplicateMovie},
+  object: activeActivity,
+});
+const duplicateState = sandbox.window.cw.inspect();
+if (!duplicateState.target || !duplicateState.target.next || duplicateState.target.next.file_index !== 55) {
+  throw new Error('Duplicate episode lookup should prefer latest S2E5 entry: ' + JSON.stringify(duplicateState.target));
+}
+console.log('duplicate episode lookup OK:', duplicateState.target.next.file_index);
+
+if (noties.some((n) => /error|ошиб/i.test(n))) {
+  throw new Error('Lampa.Noty error shown: ' + noties.join(' | '));
+}
+
+console.log('cw smoke OK');
