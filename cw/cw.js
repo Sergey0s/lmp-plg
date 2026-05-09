@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '126';
+    var PLUGIN_VERSION = '127';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -2891,7 +2891,9 @@
                     ' <span class="cw-menu-ver">v' + PLUGIN_VERSION + '</span></div>' +
             '</li>'
         );
-        item.on('hover:enter', function () {
+        item.on('hover:enter click', function (e) {
+            if (e && e.preventDefault) e.preventDefault();
+            if (e && e.stopPropagation) e.stopPropagation();
             safe('Activity.push', function () {
                 Lampa.Activity.push({
                     url: '', title: 'Продолжить · диагностика v' + PLUGIN_VERSION,
@@ -3146,7 +3148,14 @@
         }
 
         addStyles();
-        safe('Component.add', function () { Lampa.Component.add(COMPONENT_ID, DiagComponent); });
+        safe('Component.add', function () {
+            Lampa.Component.add(COMPONENT_ID, DiagComponent);
+            // Некоторые меню/экраны Lampa открывают component по data-action
+            // пункта меню (PLUGIN_ID), а не по manifest.component. Регистрируем
+            // алиас, чтобы из любой точки открывалась диагностика, а не пустой
+            // стандартный экран «Здесь пусто».
+            Lampa.Component.add(PLUGIN_ID, DiagComponent);
+        });
         registerManifest();
         addMenuRobust();
         exposeCw();
