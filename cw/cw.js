@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '124';
+    var PLUGIN_VERSION = '125';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -2501,15 +2501,28 @@
     // 15. Экран диагностики (Lampa.Component)
     // =========================================================================
     function DiagComponent() {
-        var scroll = new Lampa.Scroll({ mask: true, over: true });
         var outer = $('<div class="cw-diag"></div>');
-        var body = $('<div class="cw-diag__body"></div>');
-        var scrollEl = null;
+        var body = $('<div class="cw-diag__scroll"></div>');
 
         function row(label, value, accent) {
-            return $('<div class="cw-diag__row' + (accent ? ' cw-diag__row--accent' : '') + '">' +
+            return $('<div class="selector cw-diag__row' + (accent ? ' cw-diag__row--accent' : '') + '">' +
                 '<div class="cw-diag__label">' + label + '</div>' +
                 '<div class="cw-diag__value">' + value + '</div></div>');
+        }
+
+        function scrollFocusedIntoView() {
+            var focused = body.find('.focus').first();
+            if (!focused.length) focused = body.find('.selector').first();
+            if (!focused.length) return;
+            try {
+                var el = focused[0];
+                var top = el.offsetTop;
+                var bottom = top + el.offsetHeight;
+                var viewTop = body.scrollTop();
+                var viewBottom = viewTop + body.innerHeight();
+                if (top < viewTop) body.scrollTop(Math.max(0, top - 20));
+                else if (bottom > viewBottom) body.scrollTop(bottom - body.innerHeight() + 20);
+            } catch (e) {}
         }
 
         function entry(p, hash) {
@@ -2531,23 +2544,25 @@
             safe('bg', function () { Lampa.Background.immediately(Lampa.Utils.cardImgBackground({ img: '' })); });
             Lampa.Controller.add('content', {
                 toggle: function () {
-                    var render = scroll.render();
-                    Lampa.Controller.collectionSet(render);
-                    var first = render.find('.selector').first()[0];
-                    Lampa.Controller.collectionFocus(first || false, render);
+                    Lampa.Controller.collectionSet(body);
+                    var first = body.find('.selector').first()[0];
+                    Lampa.Controller.collectionFocus(first || false, body);
+                    setTimeout(scrollFocusedIntoView, 50);
                 },
                 left: function () { Lampa.Controller.toggle('menu'); },
                 up: function () {
                     try {
                         if (Navigator.canmove && Navigator.canmove('up')) Navigator.move('up');
-                        else if (scrollEl) scrollEl.scrollTop(Math.max(0, scrollEl.scrollTop() - 220));
-                    } catch (e) { if (scrollEl) scrollEl.scrollTop(Math.max(0, scrollEl.scrollTop() - 220)); }
+                        else body.scrollTop(Math.max(0, body.scrollTop() - 220));
+                    } catch (e) { body.scrollTop(Math.max(0, body.scrollTop() - 220)); }
+                    setTimeout(scrollFocusedIntoView, 0);
                 },
                 down: function () {
                     try {
                         if (Navigator.canmove && Navigator.canmove('down')) Navigator.move('down');
-                        else if (scrollEl) scrollEl.scrollTop(scrollEl.scrollTop() + 220);
-                    } catch (e) { if (scrollEl) scrollEl.scrollTop(scrollEl.scrollTop() + 220); }
+                        else body.scrollTop(body.scrollTop() + 220);
+                    } catch (e) { body.scrollTop(body.scrollTop() + 220); }
+                    setTimeout(scrollFocusedIntoView, 0);
                 },
                 back: function () { Lampa.Activity.backward(); }
             });
@@ -2556,7 +2571,7 @@
 
         this.pause = function () {};
         this.stop = function () {};
-        this.destroy = function () { scroll.destroy(); outer.remove(); };
+        this.destroy = function () { outer.remove(); };
 
         var params = readParams();
         var keys = Object.keys(params).sort(function (a, b) { return (params[b].timestamp || 0) - (params[a].timestamp || 0); });
@@ -2768,14 +2783,14 @@
         });
         body.append(clearBtn);
 
-        scroll.append(body);
-        scrollEl = scroll.render();
-        scrollEl.addClass('cw-diag__scroll');
-        scrollEl.on('wheel', function (e) {
+        body.on('wheel', function (e) {
             var oe = e.originalEvent || e;
-            scrollEl.scrollTop(scrollEl.scrollTop() + (oe.deltaY || 0));
+            body.scrollTop(body.scrollTop() + (oe.deltaY || 0));
         });
-        outer.append(scrollEl);
+        body.on('hover:focus focus mouseenter', '.selector', function () {
+            setTimeout(scrollFocusedIntoView, 0);
+        });
+        outer.append(body);
     }
 
     // =========================================================================
