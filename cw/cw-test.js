@@ -698,11 +698,15 @@ if (playerPlayCalls[0].episode !== 8 || ![-1, 0].includes(playerPlayCalls[0].pos
 console.log('smart-next confirm OK:', smartTitleText);
 
 const bufferTitle = 'Smoke Buffer Movie';
-addMovieContinueEntry(bufferTitle);
+const bufferHash = addMovieContinueEntry(bufferTitle);
+storage.continue_watch_params[bufferHash].torrent_link =
+  'magnet:?xt=urn:btih:1111111111111111111111111111111111111111';
+storage.continue_watch_params[bufferHash].file_index = 1;
 const bufferMovie = {title: bufferTitle, name: bufferTitle};
 const bufferRender = makeCardRender();
 storage.cw_buffer_modal = true;
 storage.cw_buffer_pct = 10;
+sandbox.window.cw.prefetch(false);
 activeActivity = {component: 'full', movie: bufferMovie, activity: {render: () => bufferRender}};
 Lampa.Listener.send('full', {
   type: 'complite',
@@ -776,7 +780,12 @@ const prefetchMovie = {title: prefetchTitle, name: prefetchTitle, number_of_seas
 const cw = sandbox.window.cw;
 if (!cw || typeof cw.prefetch !== 'function') throw new Error('cw.prefetch API is missing');
 cw.prefetch(false);
+storage.cw_buffer_pct = 5;
 cw.prefetch(true, 5);
+const minPrefetchState = cw.prefetch(true, 3);
+if (minPrefetchState.target !== 5) {
+  throw new Error('Prefetch target should not go below buffer threshold=5: ' + JSON.stringify(minPrefetchState));
+}
 
 xhrRequests = [];
 const prefetchBefore = cw.prefetch().count;
@@ -817,6 +826,135 @@ if (xhrRequests.some((r) => r.method === 'GET' && /\/stream\//.test(r.url))) {
   throw new Error('Prefetch should not trigger preload again for same link+index');
 }
 
+const transitionTitleA = 'Smoke Prefetch Transition A';
+const transitionTitleB = 'Smoke Prefetch Transition B';
+const transitionHashA = Lampa.Utils.hash(transitionTitleA);
+const transitionHashB = Lampa.Utils.hash(transitionTitleB);
+const transitionLinkA = 'magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const transitionLinkB = 'magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+storage.continue_watch_params[transitionHashA] = {
+  title: transitionTitleA,
+  percent: 18,
+  time: 180,
+  duration: 2400,
+  timestamp: Date.now() + 9100,
+  torrent_link: transitionLinkA,
+  file_name: `${transitionTitleA}.mkv`,
+  file_index: 31,
+};
+storage.continue_watch_params[transitionHashB] = {
+  title: transitionTitleB,
+  percent: 36,
+  time: 860,
+  duration: 2400,
+  timestamp: Date.now() + 9200,
+  torrent_link: transitionLinkB,
+  file_name: `${transitionTitleB}.mkv`,
+  file_index: 32,
+};
+notifyContinueStorageChanged();
+cw.prefetch(true, 5);
+
+xhrRequests = [];
+const transitionMovieA = {title: transitionTitleA, name: transitionTitleA};
+const transitionRenderA = makeCardRender();
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: transitionMovieA},
+  object: {activity: {render: () => transitionRenderA}},
+});
+const transitionStateA = cw.prefetch();
+if (transitionStateA.last_link !== transitionLinkA || transitionStateA.last_index !== 31 || !transitionStateA.target_reached) {
+  throw new Error('Card A should fill prefetch state: ' + JSON.stringify(transitionStateA));
+}
+const transitionPreloadA = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+if (!transitionPreloadA || transitionPreloadA.url.indexOf('index=31') === -1) {
+  throw new Error('Card A should preload index=31, got: ' + (transitionPreloadA && transitionPreloadA.url));
+}
+
+xhrRequests = [];
+const transitionMovieB = {title: transitionTitleB, name: transitionTitleB};
+const transitionRenderB = makeCardRender();
+activeActivity = {component: 'full', movie: transitionMovieB, activity: {render: () => transitionRenderB}};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: transitionMovieB},
+  object: activeActivity,
+});
+const transitionStateB = cw.prefetch();
+if (transitionStateB.last_link !== transitionLinkB || transitionStateB.last_index !== 32 || !transitionStateB.target_reached) {
+  throw new Error('Card B should replace prefetch state from card A: ' + JSON.stringify(transitionStateB));
+}
+const transitionPreloadB = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+if (!transitionPreloadB || transitionPreloadB.url.indexOf('index=32') === -1 || transitionPreloadB.url.indexOf('index=31') !== -1) {
+  throw new Error('Card B should preload only index=32, got: ' + (transitionPreloadB && transitionPreloadB.url));
+}
+
+xhrRequests = [];
+playerPlayCalls = [];
+storage.cw_buffer_modal = true;
+const transitionBtnB = transitionRenderB.find('.button--continue-watch').first();
+if (!transitionBtnB.length) throw new Error('Card B continue button was not injected');
+transitionBtnB.trigger('hover:enter');
+if (playerPlayCalls.length !== 1 || playerPlayCalls[0].position !== 860) {
+  throw new Error('Card B should start from saved position after ready prefetch: ' + JSON.stringify(playerPlayCalls[0]));
+}
+const repeatedTransitionPreload = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+if (repeatedTransitionPreload) {
+  throw new Error('Card B ready prefetch should not restart from 0, got: ' + repeatedTransitionPreload.url);
+}
+storage.cw_buffer_modal = false;
+console.log('prefetch card transition OK:', transitionStateA.last_index + '->' + transitionStateB.last_index);
+
+storage.cw_buffer_pct = 20;
+const upgradedOldTargetState = cw.prefetch(true, 5);
+if (upgradedOldTargetState.target !== 20) {
+  throw new Error('Old prefetch target=5 should be lifted to buffer threshold=20: ' + JSON.stringify(upgradedOldTargetState));
+}
+storage.cw_buffer_pct = 5;
+
+const readyPrefetchTitle = 'Smoke Ready Prefetch Movie';
+const readyPrefetchHash = Lampa.Utils.hash(readyPrefetchTitle);
+storage.continue_watch_params[readyPrefetchHash] = {
+  title: readyPrefetchTitle,
+  percent: 21,
+  time: 420,
+  duration: 2400,
+  timestamp: Date.now() + 9000,
+  torrent_link: nextPrefetchEntry.torrent_link,
+  file_name: `${readyPrefetchTitle} ready.mkv`,
+  file_index: 13,
+};
+notifyContinueStorageChanged();
+const readyPrefetchMovie = {title: readyPrefetchTitle, name: readyPrefetchTitle};
+const readyPrefetchRender = makeCardRender();
+storage.cw_buffer_modal = true;
+activeActivity = {
+  component: 'full',
+  movie: readyPrefetchMovie,
+  activity: {render: () => readyPrefetchRender},
+};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: readyPrefetchMovie},
+  object: activeActivity,
+});
+xhrRequests = [];
+playerPlayCalls = [];
+const readyPrefetchBtn = readyPrefetchRender.find('.button--continue-watch').first();
+if (!readyPrefetchBtn.length) throw new Error('Ready-prefetch continue button was not injected');
+readyPrefetchBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 1 || playerPlayCalls[0].position !== 420) {
+  throw new Error('Ready prefetch should launch from saved position without waiting: ' + JSON.stringify(playerPlayCalls[0]));
+}
+const repeatedReadyPreload = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+if (repeatedReadyPreload) {
+  throw new Error('Ready prefetch must not restart preload for same file, got: ' + repeatedReadyPreload.url);
+}
+storage.cw_buffer_modal = false;
+console.log('ready prefetch no-restart OK');
+
+const beforeChangedIndexCount = cw.prefetch().count;
 nextPrefetchEntry.file_index = 14;
 xhrRequests = [];
 const changedIndexRender = makeCardRender();
@@ -826,7 +964,7 @@ Lampa.Listener.send('full', {
   object: {activity: {render: () => changedIndexRender}},
 });
 const changedIndexState = cw.prefetch();
-if (changedIndexState.count !== prefetchState.count + 1 || changedIndexState.last_index !== 14) {
+if (changedIndexState.count !== beforeChangedIndexCount + 1 || changedIndexState.last_index !== 14) {
   throw new Error('Prefetch should restart when file_index changes in same torrent: ' + JSON.stringify(changedIndexState));
 }
 const changedIndexPreload = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
@@ -851,6 +989,7 @@ notifyContinueStorageChanged();
 const sameTorrentBufferMovie = {title: sameTorrentBufferTitle, name: sameTorrentBufferTitle};
 const sameTorrentBufferRender = makeCardRender();
 storage.cw_buffer_modal = true;
+sandbox.window.cw.prefetch(false);
 activeActivity = {
   component: 'full',
   movie: sameTorrentBufferMovie,
