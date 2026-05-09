@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '143';
+    var PLUGIN_VERSION = '146';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -1726,6 +1726,9 @@
     } catch (e) {}
 
     var fileLabel = (params.file_name || '').split('/').pop();
+    var pollStartedAt = Date.now();
+    var zeroStatsPolls = 0;
+    var pollErrors = 0;
 
     var modal = $(
       '<div class="cw-buf">' +
@@ -1835,6 +1838,8 @@
       var allPeers =
         info.peers || info.total_peers || info.TotalPeers || info.Peers || 0;
       var stat = info.stat_string || info.StatString || info.stat || '';
+      var noBufferStats = !preSize && !preBytes && !speed;
+      pollErrors = 0;
 
       var pct =
         preSize > 0 ? Math.min(100, Math.round((preBytes / preSize) * 100)) : 0;
@@ -1881,6 +1886,20 @@
         modal
           .find('.cw-buf__status')
           .text('подключение к пирам (' + allPeers + ' доступно)…');
+      } else if (noBufferStats) {
+        zeroStatsPolls++;
+        if (zeroStatsPolls === 3) {
+          log('buffer: zero stats, retriggering preload for current file');
+          triggerPreload(streamUrl, 60000);
+        }
+        if (zeroStatsPolls >= 8 || Date.now() - pollStartedAt > 12000) {
+          warn('buffer: no preload stats, keeping modal open');
+          modal
+            .find('.cw-buf__status')
+            .text('TorrServer не отдаёт прогресс буфера. Ждём или нажми «Запустить сейчас» вручную.');
+        }
+      } else {
+        zeroStatsPolls = 0;
       }
     }
 
@@ -1893,8 +1912,16 @@
           if (!aborted && info) applyStats(info);
         },
         function () {
-          if (!aborted)
+          if (!aborted) {
+            pollErrors++;
             modal.find('.cw-buf__status').text('нет связи с TorrServer');
+            if (pollErrors >= 3 || Date.now() - pollStartedAt > 12000) {
+              warn('buffer: status polling failed, keeping modal open');
+              modal
+                .find('.cw-buf__status')
+                .text('статус буфера недоступен. Автозапуск остановлен, чтобы не открыть чёрный экран.');
+            }
+          }
         }
       );
     }
@@ -1912,8 +1939,11 @@
       hash = h;
       stopPrefetchPoll();
       // Всегда триггерим preload для текущего file_index — даже если торрент
-      // уже добавлен и для другого файла этого торрента prefetch завершился.
-      if (!sameFile) triggerPreload(streamUrl, 60000);
+      // уже добавлен и для этого файла prefetch «как будто» завершился. На
+      // Android/TorrServer action=get иногда возвращает 0/0 после возврата из
+      // внешнего плеера, а повторный /stream?preload оживляет именно текущий
+      // файл без вреда для уже добавленного торрента.
+      triggerPreload(streamUrl, 60000);
       modal
         .find('.cw-buf__status')
         .text(
@@ -1936,21 +1966,6 @@
       startPolling(cachedHash);
     } else {
       modal.find('.cw-buf__status').text('проверка TorrServer…');
-      tsPing(
-        function () {
-          if (aborted) return;
-          tryAdd();
-        },
-        function (err) {
-          if (aborted) return;
-          var msg = err && err.message ? err.message : 'TorrServer недоступен';
-          warn('TorrServer ping failed: ' + msg);
-          modal
-            .find('.cw-buf__status')
-            .text(msg + ' — проверь TorrServer и URL в Lampa');
-        }
-      );
-
       var attempts = 0;
       var tryAdd = function () {
         attempts++;
@@ -1989,27 +2004,38 @@
               setTimeout(tryAdd, 2000);
             } else {
               // Хеш получить не смогли (CORS / линк не magnet). Без хеша
-              // polling статуса невозможен. Триггерим preload и сразу
-              // открываем плеер: video-элемент при загрузке /stream сам
-              // заставит TorrServer добавить торрент (media-loads не
-              // подчиняются CORS).
+              // polling статуса невозможен, поэтому не запускаем плеер
+              // автоматически: иначе пользователь может получить чёрный экран.
               warn(
                 'add failed after ' +
                   attempts +
                   ' attempts (' +
                   msg +
-                  ') — falling back to direct player launch'
+                  ') — keeping buffer modal open'
               );
               triggerPreload(streamUrl, 60000);
               modal
                 .find('.cw-buf__status')
-                .text('пропускаем модалку, запускаем плеер…');
-              setTimeout(launchNow, 400);
+                .text('не удалось проверить буфер: ' + msg.slice(0, 70) + '. Автозапуск остановлен.');
             }
           }
         );
       };
-      tryAdd();
+
+      tsPing(
+        function () {
+          if (aborted) return;
+          tryAdd();
+        },
+        function (err) {
+          if (aborted) return;
+          var msg = err && err.message ? err.message : 'TorrServer недоступен';
+          warn('TorrServer ping failed: ' + msg);
+          modal
+            .find('.cw-buf__status')
+            .text(msg + ' — проверь TorrServer и URL в Lampa');
+        }
+      );
     }
   }
 
@@ -2892,20 +2918,8 @@
         ? 'Эпизод просмотрен полностью'
         : 'Сохранено: ' + posStr + (pct > 0 ? ' · ' + pct + '%' : '');
 
-    var isSeries = !!(
-      movie.number_of_seasons &&
-      params.season &&
-      params.episode
-    );
-    var nxt = isSeries
-      ? findNextEpisodeParams(movie, params) ||
-        findNextEpisodeFromFiles(movie, params)
-      : null;
-    if (nxt && nxt.season === params.season && nxt.episode === params.episode)
-      nxt = null;
-
     log(
-      'exit-summary: show (' +
+      'exit-summary: notify (' +
         (reason || '?') +
         ') hash=' +
         String(hash).slice(0, 12) +
@@ -2914,46 +2928,7 @@
         ' time=' +
         time
     );
-
-    var primary, secondary;
-    if (nxt) {
-      primary = {
-        label: 'Следующий S' + nxt.season + ' E' + nxt.episode,
-        onPick: function () {
-          launchPlayer(movie, cloneFresh(nxt), {startFresh: true});
-        },
-      };
-      secondary = {label: 'OK', onPick: function () {}};
-    } else {
-      primary = {label: 'OK', onPick: function () {}};
-      secondary = {
-        label: 'Сбросить прогресс',
-        onPick: function () {
-          resetEntry(hash);
-          noty('Прогресс сброшен');
-          var act =
-            Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
-          if (act && act.activity && act.activity.render)
-            refreshCardButton(movie, act.activity.render());
-        },
-      };
-    }
-
-    showCenterConfirm({
-      title: titleLine,
-      subtitle: subLine,
-      primary: primary,
-      secondary: secondary,
-      footer: {
-        label: 'Не показывать больше',
-        onPick: function () {
-          safe('cwExitSummaryOff', function () {
-            Lampa.Storage.set(EXIT_SUMMARY_KEY, false);
-          });
-          noty('Уведомление при выходе отключено');
-        },
-      },
-    });
+    noty(titleLine + ' · ' + subLine);
   }
 
   // Компактный confirm по центру: предыдущий эпизод почти досмотрен,
@@ -3431,6 +3406,17 @@
     var dur = road.duration || 0;
     if (!pct && !t && !dur) return false;
     if (!ensureEntryForLivePlayback(hash)) return false;
+    var existing = readParams()[hash];
+    if (
+      pct >= 100 &&
+      t === 0 &&
+      dur === 0 &&
+      existing &&
+      existing.time > 0
+    ) {
+      t = existing.time;
+      dur = existing.duration || dur;
+    }
     updateEntry(hash, {percent: pct, time: t, duration: dur});
     return true;
   }
