@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '138';
+    var PLUGIN_VERSION = '139';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3441,20 +3441,13 @@
   // 15. Экран диагностики (Lampa.Component)
   // =========================================================================
     function DiagComponent(object) {
-      // Каноничный Lampa-стиль (см. lampa-source/src/components/nocomponent.js
-      // и любой стандартный компонент): рендер живёт в create(), скролл — через
-      // Lampa.Scroll, навигация — через стандартный controller 'content'.
-      // НЕ используем Lampa.Controller.collectionSet / collectionFocus — они
-      // могут зациклиться через .on('focus', '.selector', ...) (см. v136
-      // Maximum call stack size exceeded).
+      // v126-style: простой DOM с overflow-y:auto, без Lampa.Scroll (он давал
+      // +многие секунды в init на наших ТВ-устройствах). Навигация — наш
+      // ручной focusDiag/moveDiag. Lampa Navigator выключен через invisible:true,
+      // иначе collectionSet/collectionFocus → бесконечная рекурсия (см. v136).
       var self = this;
-      var scroll = null;
-      try {
-        scroll = new Lampa.Scroll({mask: true, over: true, step: 250});
-      } catch (e) {
-        cwError('DiagComponent.scroll-init', e);
-      }
-      var body = $('<div class="cw-diag"></div>');
+      var outer = $('<div class="cw-diag"></div>');
+      var body = $('<div class="cw-diag__scroll"></div>');
       var focusIndex = 0;
       var built = false;
 
@@ -3481,6 +3474,21 @@
       );
     }
 
+    function scrollFocusedIntoView() {
+      var focused = body.find('.focus').first();
+      if (!focused.length) return;
+      try {
+        var el = focused[0];
+        var top = el.offsetTop;
+        var bottom = top + el.offsetHeight;
+        var viewTop = body.scrollTop();
+        var viewBottom = viewTop + body.innerHeight();
+        if (top < viewTop) body.scrollTop(Math.max(0, top - 20));
+        else if (bottom > viewBottom)
+          body.scrollTop(bottom - body.innerHeight() + 20);
+      } catch (e) {}
+    }
+
     function focusDiag(index) {
       var items = body.find('.selector');
       if (!items.length) return;
@@ -3490,8 +3498,7 @@
       items.removeClass('focus');
       var el = items.eq(focusIndex);
       el.addClass('focus');
-      // Lampa.Scroll умеет проматывать к нужному элементу
-      try { if (scroll && scroll.update) scroll.update(el, true); } catch (e) {}
+      scrollFocusedIntoView();
     }
 
     function moveDiag(delta) {
@@ -3541,30 +3548,15 @@
 
     this.create = function () {
       try { buildBody(); } catch (e) { cwError('DiagComponent.create.buildBody', e); }
-      try {
-        if (scroll) {
-          scroll.append(body);
-        }
-      } catch (e) { cwError('DiagComponent.create.scroll-append', e); }
       try { dismissEmpty(); } catch (e) { cwError('DiagComponent.create.dismissEmpty', e); }
     };
 
     this.render = function () {
-      try {
-        return scroll ? scroll.render() : body;
-      } catch (e) {
-        cwError('DiagComponent.render', e);
-        return body;
-      }
+      return outer;
     };
 
     this.start = function () {
       try { dismissEmpty(); } catch (e) { cwError('DiagComponent.start.dismissEmpty', e); }
-      setTimeout(function () {
-        safe('bg', function () {
-          Lampa.Background.immediately(Lampa.Utils.cardImgBackground({img: ''}));
-        });
-      }, 0);
       try {
         // invisible:true — мы сами рулим стрелками/фокусом через focusDiag.
         // НЕ зовём Lampa.Controller.collectionSet/collectionFocus, чтобы не
@@ -3587,8 +3579,7 @@
     this.pause = function () {};
     this.stop = function () {};
     this.destroy = function () {
-      try { if (scroll && scroll.destroy) scroll.destroy(); } catch (e) {}
-      try { body.remove(); } catch (e) {}
+      try { outer.remove(); } catch (e) {}
     };
 
     function buildBody() {
@@ -4077,7 +4068,8 @@
       });
     });
     body.append(clearBtn);
-    __mark('attach listeners');
+    outer.append(body);
+    __mark('attach listeners + outer');
 
     var __timingsHtml = '';
     for (var __i = 0; __i < __timings.length; __i++) {
