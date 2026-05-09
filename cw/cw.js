@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '148';
+    var PLUGIN_VERSION = '149';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -27,7 +27,7 @@
   var MENU_RETRY_MAX = 40;
   var MENU_RETRY_MS = 500;
 
-  var BUFFER_DEFAULT_PCT = 10;
+  var BUFFER_DEFAULT_PCT = 20;
   var BUFFER_MIN_SPEED = 50 * 1024;
   var BUFFER_POLL_MS = 1000;
   var BUFFER_SETTING_KEY = 'cw_buffer_modal';
@@ -35,7 +35,7 @@
 
   var PREFETCH_KEY = 'cw_prefetch';
   var PREFETCH_TARGET_KEY = 'cw_prefetch_target';
-  var PREFETCH_TARGET_DEF = 5;
+  var PREFETCH_TARGET_DEF = 20;
   var PREFETCH_POLL_MS = 1500;
   var PREFETCH_TIMEOUT_MS = 120000;
   var ECO_MODE_KEY = 'cw_eco_mode';
@@ -1350,7 +1350,8 @@
     return getBoolPref(PREFETCH_KEY, true);
   }
   function prefetchTarget() {
-    return getIntPref(PREFETCH_TARGET_KEY, PREFETCH_TARGET_DEF, 100);
+    var target = getIntPref(PREFETCH_TARGET_KEY, PREFETCH_TARGET_DEF, 100);
+    return Math.max(target, bufferThreshold());
   }
 
   function stopPrefetchPoll() {
