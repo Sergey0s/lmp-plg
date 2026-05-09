@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '133';
+    var PLUGIN_VERSION = '134';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3462,7 +3462,7 @@
             ? p.torrent_link.slice(0, 60) + '…'
             : p.torrent_link)
         : 'без магнета';
-      return $(
+      return (
         '<div class="selector cw-diag__entry">' +
           '<div class="cw-diag__entry-title">' +
           (p.title || '—') +
@@ -3491,9 +3491,11 @@
     this.start = function () {
       buildBody();
       dismissEmpty();
-      safe('bg', function () {
-        Lampa.Background.immediately(Lampa.Utils.cardImgBackground({img: ''}));
-      });
+      setTimeout(function () {
+        safe('bg', function () {
+          Lampa.Background.immediately(Lampa.Utils.cardImgBackground({img: ''}));
+        });
+      }, 0);
       Lampa.Controller.add(COMPONENT_ID, {
         toggle: function () {
           Lampa.Controller.collectionSet(body);
@@ -3971,12 +3973,16 @@
         '<div class="cw-diag__empty">Записей нет. Запустите воспроизведение через Торренты — здесь должна появиться запись.</div>'
       );
     } else {
-      for (var i = 0; i < Math.min(keys.length, 50); i++)
-        body.append(entry(params[keys[i]], keys[i]));
-      if (keys.length > 50)
-        body.append(
-          '<div class="cw-diag__empty">…и ещё ' + (keys.length - 50) + '</div>'
-        );
+      var entriesHtml = '';
+      var entriesLimit = Math.min(keys.length, 50);
+      for (var i = 0; i < entriesLimit; i++) {
+        entriesHtml += entry(params[keys[i]], keys[i]);
+      }
+      if (keys.length > 50) {
+        entriesHtml +=
+          '<div class="cw-diag__empty">…и ещё ' + (keys.length - 50) + '</div>';
+      }
+      body.append(entriesHtml);
     }
 
     var clearBtn = $(
