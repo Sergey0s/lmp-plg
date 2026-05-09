@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '146';
+    var PLUGIN_VERSION = '147';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3629,11 +3629,6 @@
     this.start = function () {
       try { buildBody(); } catch (e) { cwError('DiagComponent.start.buildBody', e); }
       try { dismissEmpty(false); } catch (e) { cwError('DiagComponent.start.dismissEmpty', e); }
-      setTimeout(function () {
-        safe('bg', function () {
-          Lampa.Background.immediately(Lampa.Utils.cardImgBackground({img: ''}));
-        });
-      }, 0);
       try {
       Lampa.Controller.add(COMPONENT_ID, {
         // invisible:true — выключаем Lampa Navigator для нашего экрана.
@@ -4647,6 +4642,8 @@
     hookLampaNoty();
     safe('Component.add', function () {
       Lampa.Component.add(COMPONENT_ID, DiagComponent);
+      if (MENU_DATA_ACTION !== COMPONENT_ID)
+        Lampa.Component.add(MENU_DATA_ACTION, DiagComponent);
     });
     registerManifest();
     addMenuRobust();
