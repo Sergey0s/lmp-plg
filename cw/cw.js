@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '137';
+    var PLUGIN_VERSION = '138';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3441,17 +3441,20 @@
   // 15. Экран диагностики (Lampa.Component)
   // =========================================================================
     function DiagComponent(object) {
-      // ВАЖНО (см. lampa-source/src/interaction/activity/activity.js → create):
-      //   let comp = Component.create(object)        // здесь конструктор
-      //   object.activity = new ActivitySlide(...)
-      //   comp.activity = object.activity            // ← activity появляется ПОСЛЕ
-      //   object.activity.create()                   // → comp.create(body)
-      // Поэтому в конструкторе обращаться к `this.activity` ещё нельзя, и весь
-      // тяжёлый рендер обязан жить внутри create()/start(); любое исключение
-      // в конструкторе приведёт Lampa к подмене на `nocomponent` («Здесь пусто»).
+      // Каноничный Lampa-стиль (см. lampa-source/src/components/nocomponent.js
+      // и любой стандартный компонент): рендер живёт в create(), скролл — через
+      // Lampa.Scroll, навигация — через стандартный controller 'content'.
+      // НЕ используем Lampa.Controller.collectionSet / collectionFocus — они
+      // могут зациклиться через .on('focus', '.selector', ...) (см. v136
+      // Maximum call stack size exceeded).
       var self = this;
-      var outer = $('<div class="cw-diag"></div>');
-      var body = $('<div class="cw-diag__scroll"></div>');
+      var scroll = null;
+      try {
+        scroll = new Lampa.Scroll({mask: true, over: true, step: 250});
+      } catch (e) {
+        cwError('DiagComponent.scroll-init', e);
+      }
+      var body = $('<div class="cw-diag"></div>');
       var focusIndex = 0;
       var built = false;
 
@@ -3478,22 +3481,6 @@
       );
     }
 
-    function scrollFocusedIntoView() {
-      var focused = body.find('.focus').first();
-      if (!focused.length) focused = body.find('.selector').first();
-      if (!focused.length) return;
-      try {
-        var el = focused[0];
-        var top = el.offsetTop;
-        var bottom = top + el.offsetHeight;
-        var viewTop = body.scrollTop();
-        var viewBottom = viewTop + body.innerHeight();
-        if (top < viewTop) body.scrollTop(Math.max(0, top - 20));
-        else if (bottom > viewBottom)
-          body.scrollTop(bottom - body.innerHeight() + 20);
-      } catch (e) {}
-    }
-
     function focusDiag(index) {
       var items = body.find('.selector');
       if (!items.length) return;
@@ -3503,7 +3490,8 @@
       items.removeClass('focus');
       var el = items.eq(focusIndex);
       el.addClass('focus');
-      scrollFocusedIntoView();
+      // Lampa.Scroll умеет проматывать к нужному элементу
+      try { if (scroll && scroll.update) scroll.update(el, true); } catch (e) {}
     }
 
     function moveDiag(delta) {
@@ -3552,15 +3540,25 @@
     }
 
     this.create = function () {
-      buildBody();
-      dismissEmpty();
+      try { buildBody(); } catch (e) { cwError('DiagComponent.create.buildBody', e); }
+      try {
+        if (scroll) {
+          scroll.append(body);
+        }
+      } catch (e) { cwError('DiagComponent.create.scroll-append', e); }
+      try { dismissEmpty(); } catch (e) { cwError('DiagComponent.create.dismissEmpty', e); }
     };
+
     this.render = function () {
-      return outer;
+      try {
+        return scroll ? scroll.render() : body;
+      } catch (e) {
+        cwError('DiagComponent.render', e);
+        return body;
+      }
     };
 
     this.start = function () {
-      try { buildBody(); } catch (e) { cwError('DiagComponent.start.buildBody', e); }
       try { dismissEmpty(); } catch (e) { cwError('DiagComponent.start.dismissEmpty', e); }
       setTimeout(function () {
         safe('bg', function () {
@@ -3568,42 +3566,29 @@
         });
       }, 0);
       try {
-      Lampa.Controller.add(COMPONENT_ID, {
-        // invisible:true — выключаем Lampa Navigator для нашего экрана.
-        // Мы сами рулим up/down/enter через focusDiag/moveDiag/enterDiag и
-        // не вызываем collectionSet/collectionFocus, иначе Navigator бесконечно
-        // фокусирует наш .selector → triggers .on('focus', '.selector') →
-        // снова collectionFocus → stack overflow (см. v136 RangeError).
-        invisible: true,
-        toggle: function () {
-          focusDiag(focusIndex || 0);
-        },
-        left: function () {
-          Lampa.Controller.toggle('menu');
-        },
-        up: function () {
-          moveDiag(-1);
-        },
-        down: function () {
-          moveDiag(1);
-        },
-        right: function () {
-          moveDiag(1);
-        },
-        enter: enterDiag,
-        ok: enterDiag,
-        back: function () {
-          Lampa.Activity.backward();
-        },
-      });
-      Lampa.Controller.toggle(COMPONENT_ID);
+        // invisible:true — мы сами рулим стрелками/фокусом через focusDiag.
+        // НЕ зовём Lampa.Controller.collectionSet/collectionFocus, чтобы не
+        // получить рекурсию через .on('focus', '.selector', ...) (v136).
+        Lampa.Controller.add('content', {
+          invisible: true,
+          toggle: function () { focusDiag(focusIndex || 0); },
+          left: function () { Lampa.Controller.toggle('menu'); },
+          up: function () { moveDiag(-1); },
+          down: function () { moveDiag(1); },
+          right: function () { moveDiag(1); },
+          enter: enterDiag,
+          ok: enterDiag,
+          back: function () { Lampa.Activity.backward(); }
+        });
+        Lampa.Controller.toggle('content');
       } catch (e) { cwError('DiagComponent.start.controller', e); }
     };
 
     this.pause = function () {};
     this.stop = function () {};
     this.destroy = function () {
-      try { outer.remove(); } catch (e) { cwError('DiagComponent.destroy', e); }
+      try { if (scroll && scroll.destroy) scroll.destroy(); } catch (e) {}
+      try { body.remove(); } catch (e) {}
     };
 
     function buildBody() {
@@ -4092,18 +4077,7 @@
       });
     });
     body.append(clearBtn);
-
-    body.on('wheel', function (e) {
-      var oe = e.originalEvent || e;
-      body.scrollTop(body.scrollTop() + (oe.deltaY || 0));
-    });
-    body.on('hover:focus focus mouseenter', '.selector', function () {
-      var idx = body.find('.selector').index(this);
-      if (idx >= 0) focusIndex = idx;
-      setTimeout(scrollFocusedIntoView, 0);
-    });
-    outer.append(body);
-    __mark('attach listeners + outer');
+    __mark('attach listeners');
 
     var __timingsHtml = '';
     for (var __i = 0; __i < __timings.length; __i++) {
@@ -4140,7 +4114,6 @@
               String(err.stack).replace(/</g, '&lt;') + '</div>'
             );
           }
-          outer.append(body);
         } catch (e2) {}
       }
     }
@@ -4151,7 +4124,7 @@
   // =========================================================================
   function addStyles() {
     var css =
-      '.cw-diag{height:100%;padding:0}' +
+      '.cw-diag{padding:1.5em;padding-bottom:6rem;box-sizing:border-box}' +
       '.cw-diag__scroll{height:100%;max-height:100vh;overflow-y:auto;padding:1.5em;padding-bottom:6rem;box-sizing:border-box}' +
       '.cw-diag__title{font-size:1.6em;font-weight:bold;margin-bottom:1em}' +
       '.cw-diag__row{display:flex;justify-content:space-between;padding:.5em .8em;margin-bottom:.3em;background:rgba(255,255,255,.04);border-radius:.4em;font-size:.95em}' +
