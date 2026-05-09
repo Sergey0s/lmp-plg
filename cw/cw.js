@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '131';
+    var PLUGIN_VERSION = '132';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3370,17 +3370,26 @@
   // 15. Экран диагностики (Lampa.Component)
   // =========================================================================
     function DiagComponent(object) {
-      var activity = (object && object.activity) || null;
+      // ВАЖНО (см. lampa-source/src/interaction/activity/activity.js → create):
+      //   let comp = Component.create(object)        // здесь конструктор
+      //   object.activity = new ActivitySlide(...)
+      //   comp.activity = object.activity            // ← activity появляется ПОСЛЕ
+      //   object.activity.create()                   // → comp.create(body)
+      // Поэтому в конструкторе обращаться к `this.activity` ещё нельзя, и весь
+      // тяжёлый рендер обязан жить внутри create()/start(); любое исключение
+      // в конструкторе приведёт Lampa к подмене на `nocomponent` («Здесь пусто»).
+      var self = this;
       var outer = $('<div class="cw-diag"></div>');
       var body = $('<div class="cw-diag__scroll"></div>');
       var focusIndex = 0;
+      var built = false;
 
       function dismissEmpty() {
         try {
-          if (activity && activity.loader) activity.loader(false);
+          if (self.activity && self.activity.loader) self.activity.loader(false);
         } catch (e) {}
         try {
-          if (activity && activity.toggle) activity.toggle();
+          if (self.activity && self.activity.toggle) self.activity.toggle();
         } catch (e) {}
       }
 
@@ -3471,12 +3480,16 @@
       );
     }
 
-    this.create = function () { dismissEmpty(); };
+    this.create = function () {
+      buildBody();
+      dismissEmpty();
+    };
     this.render = function () {
       return outer;
     };
 
     this.start = function () {
+      buildBody();
       dismissEmpty();
       safe('bg', function () {
         Lampa.Background.immediately(Lampa.Utils.cardImgBackground({img: ''}));
@@ -3514,6 +3527,11 @@
     this.destroy = function () {
       outer.remove();
     };
+
+    function buildBody() {
+      if (built) return;
+      built = true;
+      try {
 
     var params = readParams();
     var keys = Object.keys(params).sort(function (a, b) {
@@ -3988,6 +4006,28 @@
       setTimeout(scrollFocusedIntoView, 0);
     });
     outer.append(body);
+
+      } catch (err) {
+        log('DiagComponent build error:', err && err.message);
+        try {
+          body.empty();
+          body.append(
+            '<div class="cw-diag__title">Продолжить · диагностика v' + PLUGIN_VERSION + '</div>'
+          );
+          body.append(
+            '<div class="cw-diag__empty">⚠ ошибка построения диагностики: ' +
+            ((err && err.message) || 'unknown') + '</div>'
+          );
+          if (err && err.stack) {
+            body.append(
+              '<div class="cw-diag__empty" style="font-family:monospace;font-size:.78em;opacity:.55;white-space:pre-wrap;word-break:break-all">' +
+              String(err.stack).replace(/</g, '&lt;') + '</div>'
+            );
+          }
+          outer.append(body);
+        } catch (e2) {}
+      }
+    }
   }
 
   // =========================================================================
