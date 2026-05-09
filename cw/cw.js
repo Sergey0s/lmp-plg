@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '139';
+    var PLUGIN_VERSION = '140';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -223,6 +223,23 @@
     if (err && err.stack) msg += '\n' + String(err.stack).split('\n').slice(0, 6).join('\n');
     cwToast(msg, 'err');
     try { console.warn('[CW]', label, err && err.stack ? err.stack : err); } catch (e) {}
+  }
+
+  function hookLampaNoty() {
+    try {
+      if (!Lampa || !Lampa.Noty || !Lampa.Noty.show || Lampa.Noty.__cw_hooked) return;
+      var originalShow = Lampa.Noty.show;
+      Lampa.Noty.show = function (text) {
+        try {
+          var msg = String(text || '');
+          if (msg && (msg.indexOf('error') !== -1 || msg.indexOf('Error') !== -1 || msg.indexOf('ошиб') !== -1)) {
+            cwToast('Lampa.Noty: ' + msg, 'err');
+          }
+        } catch (e) {}
+        return originalShow.apply(this, arguments);
+      };
+      Lampa.Noty.__cw_hooked = true;
+    } catch (e) {}
   }
 
   // глобальный перехватчик: показываем только ошибки, что прилетели из нашего плагина
@@ -3451,12 +3468,12 @@
       var focusIndex = 0;
       var built = false;
 
-      function dismissEmpty() {
+      function dismissEmpty(allowToggle) {
         try {
           if (self.activity && self.activity.loader) self.activity.loader(false);
         } catch (e) {}
         try {
-          if (self.activity && self.activity.toggle) self.activity.toggle();
+          if (allowToggle && self.activity && self.activity.toggle) self.activity.toggle();
         } catch (e) {}
       }
 
@@ -3548,7 +3565,7 @@
 
     this.create = function () {
       try { buildBody(); } catch (e) { cwError('DiagComponent.create.buildBody', e); }
-      try { dismissEmpty(); } catch (e) { cwError('DiagComponent.create.dismissEmpty', e); }
+      try { dismissEmpty(true); } catch (e) { cwError('DiagComponent.create.dismissEmpty', e); }
     };
 
     this.render = function () {
@@ -3556,7 +3573,7 @@
     };
 
     this.start = function () {
-      try { dismissEmpty(); } catch (e) { cwError('DiagComponent.start.dismissEmpty', e); }
+      try { dismissEmpty(false); } catch (e) { cwError('DiagComponent.start.dismissEmpty', e); }
       try {
         // invisible:true — мы сами рулим стрелками/фокусом через focusDiag.
         // НЕ зовём Lampa.Controller.collectionSet/collectionFocus, чтобы не
@@ -4542,6 +4559,7 @@
     }
 
     addStyles();
+    hookLampaNoty();
     safe('Component.add', function () {
       Lampa.Component.add(COMPONENT_ID, DiagComponent);
     });
