@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '136';
+    var PLUGIN_VERSION = '137';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3569,11 +3569,14 @@
       }, 0);
       try {
       Lampa.Controller.add(COMPONENT_ID, {
+        // invisible:true — выключаем Lampa Navigator для нашего экрана.
+        // Мы сами рулим up/down/enter через focusDiag/moveDiag/enterDiag и
+        // не вызываем collectionSet/collectionFocus, иначе Navigator бесконечно
+        // фокусирует наш .selector → triggers .on('focus', '.selector') →
+        // снова collectionFocus → stack overflow (см. v136 RangeError).
+        invisible: true,
         toggle: function () {
-          Lampa.Controller.collectionSet(body);
-          var first = body.find('.selector').first()[0];
-          Lampa.Controller.collectionFocus(first || false, body);
-          focusDiag(0);
+          focusDiag(focusIndex || 0);
         },
         left: function () {
           Lampa.Controller.toggle('menu');
