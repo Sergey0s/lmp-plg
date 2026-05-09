@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '122';
+    var PLUGIN_VERSION = '124';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -2504,6 +2504,7 @@
         var scroll = new Lampa.Scroll({ mask: true, over: true });
         var outer = $('<div class="cw-diag"></div>');
         var body = $('<div class="cw-diag__body"></div>');
+        var scrollEl = null;
 
         function row(label, value, accent) {
             return $('<div class="cw-diag__row' + (accent ? ' cw-diag__row--accent' : '') + '">' +
@@ -2530,12 +2531,24 @@
             safe('bg', function () { Lampa.Background.immediately(Lampa.Utils.cardImgBackground({ img: '' })); });
             Lampa.Controller.add('content', {
                 toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(false, scroll.render());
+                    var render = scroll.render();
+                    Lampa.Controller.collectionSet(render);
+                    var first = render.find('.selector').first()[0];
+                    Lampa.Controller.collectionFocus(first || false, render);
                 },
                 left: function () { Lampa.Controller.toggle('menu'); },
-                up: function () { Navigator.move('up'); },
-                down: function () { Navigator.move('down'); },
+                up: function () {
+                    try {
+                        if (Navigator.canmove && Navigator.canmove('up')) Navigator.move('up');
+                        else if (scrollEl) scrollEl.scrollTop(Math.max(0, scrollEl.scrollTop() - 220));
+                    } catch (e) { if (scrollEl) scrollEl.scrollTop(Math.max(0, scrollEl.scrollTop() - 220)); }
+                },
+                down: function () {
+                    try {
+                        if (Navigator.canmove && Navigator.canmove('down')) Navigator.move('down');
+                        else if (scrollEl) scrollEl.scrollTop(scrollEl.scrollTop() + 220);
+                    } catch (e) { if (scrollEl) scrollEl.scrollTop(scrollEl.scrollTop() + 220); }
+                },
                 back: function () { Lampa.Activity.backward(); }
             });
             Lampa.Controller.toggle('content');
@@ -2575,6 +2588,46 @@
                 ' · keys=' + S.last_lookup.total +
                 (S.last_lookup.reason ? ' · ' + S.last_lookup.reason : '')));
         }
+
+        var actNow = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+        var activeMovie = actNow && (actNow.movie || (actNow.activity && actNow.activity.movie));
+        if (activeMovie) {
+            var inspectTarget = pickContinueTarget(activeMovie);
+            if (inspectTarget && inspectTarget.params) {
+                var cur = inspectTarget.params;
+                var curHash = generateHash(activeMovie, cur.season, cur.episode);
+                var curTl = safe('diag.curTimeline', function () { return Lampa.Timeline.view(curHash); }) || {};
+                var fv = safe('diag.fileView', function () { return Lampa.Storage.get(TIMELINE_STORE_KEY, {}); }) || {};
+                var curFv = fv[curHash] || {};
+                var currentLabel = (cur.season ? ('S' + cur.season + ' E' + cur.episode) : 'фильм') +
+                    ' · params ' + (cur.percent || 0) + '% ' + formatTime(cur.time || 0) +
+                    ' · timeline ' + (curTl.percent || 0) + '% ' + formatTime(curTl.time || 0) +
+                    ' · file_view ' + (curFv.percent || 0) + '% ' + formatTime(curFv.time || 0) +
+                    ' · index=' + (typeof cur.file_index === 'number' ? cur.file_index : '—') +
+                    ' · file=' + (cur.file_name ? '<span style="color:#7c7">yes</span>' : '<span style="color:#f66">no</span>');
+                body.append(row('▸ inspect: current', currentLabel, true));
+
+                if (inspectTarget.nextParams) {
+                    var nxt = inspectTarget.nextParams;
+                    body.append(row('▸ inspect: next',
+                        'S' + nxt.season + ' E' + nxt.episode +
+                        ' · index=' + (typeof nxt.file_index === 'number' ? nxt.file_index : '—') +
+                        ' · file=' + (nxt.file_name ? '<span style="color:#7c7">yes</span>' : '<span style="color:#f66">no</span>') +
+                        (nxt.synthetic_next ? ' · synthetic' : '') +
+                        ' · smart-next=' + (inspectTarget.hasNext ? '<span style="color:#7c7">yes</span>' : 'no'), true));
+                } else {
+                    body.append(row('▸ inspect: next', inspectTarget.hasNext ?
+                        '<span style="color:#f66">hasNext=true, но nextParams пустой</span>' :
+                        '<span style="opacity:.6">не выбран</span>', true));
+                }
+            } else {
+                body.append(row('▸ inspect: active card',
+                    '"' + pickTitle(activeMovie) + '" · <span style="color:#f66">continue target не найден</span>', true));
+            }
+        } else {
+            body.append(row('▸ inspect: active card', '<span style="opacity:.6">нет активной карточки</span>', true));
+        }
+
         body.append(row('Debug log', DEBUG ? 'включён · cw.debug(false) чтобы выключить' : 'выключен · cw.debug(true) чтобы включить'));
         body.append(row('Окно буферизации',
             (bufferingEnabled() ? '<span style="color:#7c7">ВКЛ</span>' : '<span style="color:#f66">ВЫКЛ</span>') +
@@ -2716,7 +2769,13 @@
         body.append(clearBtn);
 
         scroll.append(body);
-        outer.append(scroll.render());
+        scrollEl = scroll.render();
+        scrollEl.addClass('cw-diag__scroll');
+        scrollEl.on('wheel', function (e) {
+            var oe = e.originalEvent || e;
+            scrollEl.scrollTop(scrollEl.scrollTop() + (oe.deltaY || 0));
+        });
+        outer.append(scrollEl);
     }
 
     // =========================================================================
@@ -2724,7 +2783,8 @@
     // =========================================================================
     function addStyles() {
         var css =
-            '.cw-diag{padding:1.5em;padding-bottom:6rem}' +
+            '.cw-diag{height:100%;padding:0}' +
+            '.cw-diag__scroll{height:100%;max-height:100vh;overflow-y:auto;padding:1.5em;padding-bottom:6rem;box-sizing:border-box}' +
             '.cw-diag__title{font-size:1.6em;font-weight:bold;margin-bottom:1em}' +
             '.cw-diag__row{display:flex;justify-content:space-between;padding:.5em .8em;margin-bottom:.3em;background:rgba(255,255,255,.04);border-radius:.4em;font-size:.95em}' +
             '.cw-diag__row--accent{background:rgba(124,58,237,.15)}' +
@@ -2858,6 +2918,108 @@
                 for (var h in p) if ((p[h].title || '').toLowerCase().indexOf(qLow) !== -1) r[h] = p[h];
                 console.log('[CW] find("' + q + '"):', r);
                 return r;
+            },
+            inspect: function (q) {
+                var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                var activeMovie = act && (act.movie || (act.activity && act.activity.movie));
+                var titleQuery = String(q || pickTitle(activeMovie) || '').toLowerCase();
+                var params = readParams();
+                var out = {
+                    version: PLUGIN_VERSION,
+                    active_title: pickTitle(activeMovie),
+                    query: titleQuery,
+                    key: S.active_key,
+                    target: null,
+                    entries: [],
+                    prefetch: {
+                        enabled: prefetchEnabled(),
+                        target: prefetchTarget(),
+                        last_pct: S.prefetch_pct,
+                        reached: S.prefetch_target_reached,
+                        polling: !!S.prefetch_poll_iv,
+                        last_index: S.last_prefetched_index,
+                        speed: S.prefetch_speed
+                    },
+                    runtime: {
+                        modal_open: S.modal_open,
+                        buffer_open: !!S.buffer_close,
+                        active_xhrs: S.active_xhrs,
+                        timeline_updates: S.timeline_updates,
+                        file_view_changes: S.file_view_changes
+                    }
+                };
+
+                var movie = activeMovie;
+                if (!movie && titleQuery) {
+                    movie = {
+                        title: titleQuery,
+                        name: titleQuery,
+                        number_of_seasons: true
+                    };
+                }
+
+                if (movie) {
+                    var target = pickContinueTarget(movie);
+                    if (target) {
+                        out.target = {
+                            current: target.params ? {
+                                season: target.params.season,
+                                episode: target.params.episode,
+                                percent: target.params.percent,
+                                time: target.params.time,
+                                duration: target.params.duration,
+                                file_index: target.params.file_index,
+                                has_file: !!(target.params.file_name && target.params.torrent_link)
+                            } : null,
+                            hasNext: !!target.hasNext,
+                            next: target.nextParams ? {
+                                season: target.nextParams.season,
+                                episode: target.nextParams.episode,
+                                percent: target.nextParams.percent,
+                                time: target.nextParams.time,
+                                duration: target.nextParams.duration,
+                                file_index: target.nextParams.file_index,
+                                has_file: !!(target.nextParams.file_name && target.nextParams.torrent_link),
+                                synthetic: !!target.nextParams.synthetic_next
+                            } : null,
+                            currentPercent: target.currentPercent,
+                            lookup: S.last_lookup
+                        };
+                    } else {
+                        out.target = { missing: true, lookup: S.last_lookup };
+                    }
+                }
+
+                var fv = safe('inspect.file_view', function () { return Lampa.Storage.get(TIMELINE_STORE_KEY, {}); }) || {};
+                var qLow = titleQuery;
+                for (var h in params) {
+                    var rec = params[h];
+                    if (!rec || !rec.title) continue;
+                    if (qLow && String(rec.title).toLowerCase().indexOf(qLow) === -1) continue;
+                    var tl = safe('inspect.timeline', function () { return Lampa.Timeline.view(h); }) || null;
+                    out.entries.push({
+                        hash: h,
+                        title: rec.title,
+                        season: rec.season,
+                        episode: rec.episode,
+                        percent: rec.percent,
+                        time: rec.time,
+                        duration: rec.duration,
+                        file_index: rec.file_index,
+                        has_file: !!(rec.file_name && rec.torrent_link),
+                        synthetic_next: !!rec.synthetic_next,
+                        timestamp: rec.timestamp,
+                        timeline: tl ? { percent: tl.percent, time: tl.time, duration: tl.duration } : null,
+                        file_view: fv[h] ? { percent: fv[h].percent, time: fv[h].time, duration: fv[h].duration } : null
+                    });
+                }
+                out.entries.sort(function (a, b) {
+                    if ((a.season || 0) !== (b.season || 0)) return (a.season || 0) - (b.season || 0);
+                    if ((a.episode || 0) !== (b.episode || 0)) return (a.episode || 0) - (b.episode || 0);
+                    return (b.timestamp || 0) - (a.timestamp || 0);
+                });
+                console.log('[CW] inspect:', out);
+                return out;
             },
             clear: function () {
                 safe('clear', function () { Lampa.Storage.set(S.active_key || 'continue_watch_params', {}); });
