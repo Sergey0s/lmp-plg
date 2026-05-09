@@ -21,7 +21,11 @@ class MiniQuery {
     this.nodes.forEach((node) => {
       node.children = node.children || [];
       add.forEach((item) => {
-        if (item && item.__miniNode) node.children.push(item);
+        if (item && item.__miniNode) {
+          item.parent = node;
+          item.isConnected = true;
+          node.children.push(item);
+        }
         else {
           const html = String(item || '');
           node.html = (node.html || '') + html;
@@ -149,6 +153,11 @@ function collectSyntheticBySelector(node, selector, out) {
 
 function matchesSelector(node, selector) {
   if (!node || !selector) return false;
+  const dataAction = selector.match(/^\.menu__item\[data-action="([^"]+)"\]$/);
+  if (dataAction) {
+    return !!(node.classes && node.classes.menu__item) &&
+      String(node.html || '').includes(`data-action="${dataAction[1]}"`);
+  }
   if (selector.charAt(0) === '.') return !!(node.classes && node.classes[selector.slice(1)]);
   if (selector.indexOf('[data-') === 0) return false;
   return false;
@@ -184,7 +193,12 @@ function $(arg) {
   if (typeof arg === 'string' && arg.trim().charAt(0) === '<') return new MiniQuery([nodeFromHtml(arg)]);
   if (arg === 'head' || arg === 'body') return new MiniQuery([nodeFromHtml(arg)]);
   if (arg === '.menu .menu__list') return new MiniQuery([menuList]);
-  if (String(arg).indexOf('.menu .menu__item') === 0) return new MiniQuery([]);
+  if (String(arg).indexOf('.menu .menu__item') === 0) {
+    const selector = String(arg).replace(/^\.menu\s+/, '');
+    const found = [];
+    collectBySelector(menuList, selector, found);
+    return new MiniQuery(found, selector);
+  }
   return new MiniQuery([]);
 }
 
@@ -202,6 +216,7 @@ let startCalls = 0;
 let noties = [];
 let playerPlayCalls = [];
 let xhrRequests = [];
+let activityPushCalls = [];
 let torrentGetResponse = {
   preloaded_bytes: 10,
   preload_size: 100,
@@ -229,7 +244,10 @@ const Lampa = {
   },
   Activity: {
     active() { return activeActivity; },
-    push(object) { return openComponent(object.component, object); },
+    push(object) {
+      activityPushCalls.push(object);
+      return openComponent(object.component, object);
+    },
     replace(object) { return openComponent(object.component, object); },
     backward() {},
   },
@@ -496,6 +514,48 @@ vm.runInContext(code, sandbox, {filename: pluginPath});
 if (!components.continue_watch_diag) {
   throw new Error('Diag component was not registered');
 }
+if (!components.continue_watch_plus) {
+  throw new Error('Diag component must also be registered under menu data-action');
+}
+
+const menuItem = $('.menu .menu__item[data-action="continue_watch_plus"]').first();
+if (!menuItem.length) throw new Error('Continue plugin menu item was not injected');
+
+activeActivity = {component: 'main', movie: null};
+activityPushCalls = [];
+let menuOpenStartedAt = Date.now();
+menuItem.trigger('hover:enter');
+let menuOpenElapsed = Date.now() - menuOpenStartedAt;
+if (activityPushCalls.length !== 1) {
+  throw new Error('Menu item hover:enter should call Activity.push once, calls=' + activityPushCalls.length);
+}
+if (activityPushCalls[0].component !== 'continue_watch_diag') {
+  throw new Error('Menu item should open diagnostics component, got: ' + activityPushCalls[0].component);
+}
+if (controllerName !== 'continue_watch_diag') {
+  throw new Error('Diagnostics controller should be active after menu open, got: ' + controllerName);
+}
+if (menuOpenElapsed > 1000) throw new Error('Menu diagnostics open too slow: ' + menuOpenElapsed + 'ms');
+console.log('menu diagnostics open OK:', menuOpenElapsed + 'ms');
+
+activeActivity = {
+  component: 'full',
+  movie: {title: 'Универ. Молодые', name: 'Универ. Молодые', number_of_seasons: 2},
+};
+menuOpenStartedAt = Date.now();
+const genericMenuResult = openComponent('continue_watch_plus', {
+  component: 'continue_watch_plus',
+  title: 'Продолжить · диагностика smoke via data-action',
+  movie: activeActivity.movie,
+});
+menuOpenElapsed = Date.now() - menuOpenStartedAt;
+if (genericMenuResult.elapsed > 1000 || menuOpenElapsed > 1000) {
+  throw new Error('Generic data-action diagnostics open too slow: ' + genericMenuResult.elapsed + '/' + menuOpenElapsed + 'ms');
+}
+if (controllerName !== 'continue_watch_diag') {
+  throw new Error('Generic data-action open should activate diagnostics controller, got: ' + controllerName);
+}
+console.log('menu data-action diagnostics open OK:', genericMenuResult.elapsed + 'ms');
 
 for (let i = 0; i < 3; i++) {
   activeActivity = {
