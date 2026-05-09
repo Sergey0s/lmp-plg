@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '147';
+    var PLUGIN_VERSION = '148';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -1934,20 +1934,22 @@
     var sameTorrent = S.last_prefetched_link === params.torrent_link;
     var sameFile = sameTorrent && S.last_prefetched_index === idx;
     var cachedHash = sameTorrent && S.prefetch_hash ? S.prefetch_hash : null;
+    var readyPrefetch =
+      sameFile && S.prefetch_target_reached && S.prefetch_pct >= threshold;
 
     var startPolling = function (h) {
       hash = h;
       stopPrefetchPoll();
-      // Всегда триггерим preload для текущего file_index — даже если торрент
-      // уже добавлен и для этого файла prefetch «как будто» завершился. На
-      // Android/TorrServer action=get иногда возвращает 0/0 после возврата из
-      // внешнего плеера, а повторный /stream?preload оживляет именно текущий
-      // файл без вреда для уже добавленного торрента.
-      triggerPreload(streamUrl, 60000);
+      // Preload работает per-file. Для нового index в том же торренте
+      // обязательно дергаем /stream?preload. Но если background prefetch уже
+      // достиг порога именно для этого file_index, не перезапускаем preload:
+      // на некоторых TorrServer повторный запрос сбрасывает видимый прогресс
+      // в buffer-modal обратно на 0%.
+      if (!readyPrefetch) triggerPreload(streamUrl, 60000);
       modal
         .find('.cw-buf__status')
         .text(
-          sameFile && S.prefetch_target_reached
+          readyPrefetch
             ? 'буфер уже накачан (prefetch ' + S.prefetch_pct + '%)'
             : sameFile
             ? 'буферизация (prefetch активен, ' + S.prefetch_pct + '%)'
@@ -1963,6 +1965,10 @@
       modal
         .find('.cw-buf__status')
         .text('используем prefetch (буфер ' + S.prefetch_pct + '%)…');
+      if (readyPrefetch) {
+        setTimeout(launchNow, 50);
+        return;
+      }
       startPolling(cachedHash);
     } else {
       modal.find('.cw-buf__status').text('проверка TorrServer…');
