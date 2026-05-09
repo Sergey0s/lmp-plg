@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '127';
+    var PLUGIN_VERSION = '129';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -15,7 +15,8 @@
     // =========================================================================
     // 1. Константы
     // =========================================================================
-    var PLUGIN_ID      = 'continue_watch';
+    var PLUGIN_ID      = 'continue_watch_plus';
+    var MENU_DATA_ACTION = PLUGIN_ID;
     var COMPONENT_ID   = 'continue_watch_diag';
     var PLUGIN_NAME    = 'Продолжить';
 
@@ -2875,12 +2876,12 @@
     }
 
     function tryAddMenu() {
-        if ($('.menu .menu__item[data-action="' + PLUGIN_ID + '"]').length) return true;
+        if ($('.menu .menu__item[data-action="' + MENU_DATA_ACTION + '"]').length) return true;
         var list = $('.menu .menu__list').eq(0);
         if (!list.length) return false;
 
         var item = $(
-            '<li class="menu__item selector" data-action="' + PLUGIN_ID + '">' +
+            '<li class="menu__item selector" data-action="' + MENU_DATA_ACTION + '">' +
                 '<div class="menu__ico">' +
                     '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
                         '<path d="M8 5v14l11-7L8 5z" fill="currentColor"/>' +
@@ -2891,9 +2892,7 @@
                     ' <span class="cw-menu-ver">v' + PLUGIN_VERSION + '</span></div>' +
             '</li>'
         );
-        item.on('hover:enter click', function (e) {
-            if (e && e.preventDefault) e.preventDefault();
-            if (e && e.stopPropagation) e.stopPropagation();
+        item.on('hover:enter', function () {
             safe('Activity.push', function () {
                 Lampa.Activity.push({
                     url: '', title: 'Продолжить · диагностика v' + PLUGIN_VERSION,
@@ -3148,14 +3147,7 @@
         }
 
         addStyles();
-        safe('Component.add', function () {
-            Lampa.Component.add(COMPONENT_ID, DiagComponent);
-            // Некоторые меню/экраны Lampa открывают component по data-action
-            // пункта меню (PLUGIN_ID), а не по manifest.component. Регистрируем
-            // алиас, чтобы из любой точки открывалась диагностика, а не пустой
-            // стандартный экран «Здесь пусто».
-            Lampa.Component.add(PLUGIN_ID, DiagComponent);
-        });
+        safe('Component.add', function () { Lampa.Component.add(COMPONENT_ID, DiagComponent); });
         registerManifest();
         addMenuRobust();
         exposeCw();
