@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '140';
+    var PLUGIN_VERSION = '143';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -88,6 +88,8 @@
     prefetch_poll_iv: 0,
     prefetch_xhr: null,
     last_full_title: null,
+    last_full_movie: null,
+    last_full_render: null,
     last_play_url: null,
     last_lookup: null,
     last_tick: 0,
@@ -617,11 +619,19 @@
     var params = readParams();
     var ix = S.title_index || buildIndex();
     var hashes = ix[title] || [];
+    var best = null;
+    var bestTs = 0;
     for (var i = 0; i < hashes.length; i++) {
       var ep = params[hashes[i]];
-      if (ep && ep.season === season && ep.episode === episode) return ep;
+      if (ep && ep.season === season && ep.episode === episode) {
+        var ts = ep.timestamp || 0;
+        if (!best || ts >= bestTs) {
+          best = ep;
+          bestTs = ts;
+        }
+      }
     }
-    return null;
+    return best;
   }
 
   function findNextEpisodeParams(movie, current) {
@@ -1478,13 +1488,29 @@
   function refreshActiveCardIfMatches(movie) {
     safe('refreshActiveCardIfMatches', function () {
       var act = Lampa.Activity.active && Lampa.Activity.active();
-      if (!act) return;
-      var activeMovie = act.movie || (act.activity && act.activity.movie);
-      var render =
+      var activeMovie = act && (act.movie || (act.activity && act.activity.movie));
+      var render = act && (
         (act.render && act.render()) ||
-        (act.activity && act.activity.render && act.activity.render());
+        (act.activity && act.activity.render && act.activity.render())
+      );
+      var expectedTitle = pickTitle(movie);
+
+      // На Android TV после возврата из внешнего плеера Activity.active()
+      // иногда временно указывает не на full-карточку или отдаёт activity без
+      // movie/render, хотя DOM карточки остаётся на экране. Поэтому храним
+      // последний render из full:complite и используем его как fallback.
+      if (
+        (!activeMovie || !render || pickTitle(activeMovie) !== expectedTitle) &&
+        S.last_full_render &&
+        pickTitle(S.last_full_movie) === expectedTitle
+      ) {
+        activeMovie = S.last_full_movie;
+        render = S.last_full_render;
+        log('active card refresh: using cached full render');
+      }
+
       if (!activeMovie || !render) return;
-      if (pickTitle(activeMovie) !== pickTitle(movie)) return;
+      if (pickTitle(activeMovie) !== expectedTitle) return;
       var oldBtn = render.find('.button--continue-watch').first();
       if (oldBtn.length) oldBtn.remove();
       _runInject(activeMovie, render, {skipPrefetch: true});
@@ -3302,14 +3328,25 @@
   function injectButton(e) {
     S.full_events++;
     var movie = e.data && e.data.movie;
+    var render = e.object && e.object.activity && e.object.activity.render
+      ? e.object.activity.render()
+      : null;
     S.last_full_title = pickTitle(movie);
+    S.last_full_movie = movie || null;
+    S.last_full_render = render || null;
     log(
       'full:complite #' + S.full_events + ' title="' + S.last_full_title + '"'
     );
 
     requestAnimationFrame(function () {
       safe('injectButton', function () {
-        _runInject(movie, e.object.activity.render());
+        var latestRender =
+          render ||
+          (e.object &&
+            e.object.activity &&
+            e.object.activity.render &&
+            e.object.activity.render());
+        _runInject(movie, latestRender);
       });
     });
   }
@@ -3354,13 +3391,40 @@
     );
   }
 
-  function syncEntryFromFileView(hash) {
+  function timelineStorageKeys(preferredKey) {
+    var keys = [];
+    var push = function (k) {
+      if (k && keys.indexOf(k) === -1) keys.push(k);
+    };
+    if (isFileViewKey(preferredKey)) push(preferredKey);
+    push(TIMELINE_STORE_KEY);
+    try {
+      var a = Lampa.Account;
+      var profile =
+        a &&
+        a.Permit &&
+        a.Permit.account &&
+        a.Permit.account.profile &&
+        a.Permit.account.profile.id;
+      if (typeof profile !== 'undefined') push(TIMELINE_STORE_KEY + '_' + profile);
+    } catch (e) {}
+    return keys;
+  }
+
+  function syncEntryFromFileView(hash, preferredKey) {
     if (!hash) return false;
-    var fv =
-      safe('fv.read', function () {
-        return Lampa.Storage.get(TIMELINE_STORE_KEY, {});
-      }) || {};
-    var road = fv[hash];
+    var road = null;
+    var keys = timelineStorageKeys(preferredKey);
+    for (var i = 0; i < keys.length; i++) {
+      var fv =
+        safe('fv.read', function () {
+          return Lampa.Storage.get(keys[i], {});
+        }) || {};
+      if (fv && fv[hash]) {
+        road = fv[hash];
+        break;
+      }
+    }
     if (!road || typeof road !== 'object') return false;
     var pct = typeof road.percent === 'number' ? road.percent : 0;
     var t = road.time || 0;
@@ -3371,11 +3435,11 @@
     return true;
   }
 
-  function onFileViewChanged() {
+  function onFileViewChanged(name) {
     var card =
       S.last_player_card || S.session_play_card || S.last_launched_card;
     var h = S.last_player_hash || S.session_play_hash;
-    if (h) syncEntryFromFileView(h);
+    if (h) syncEntryFromFileView(h, name);
     if (!card) return;
     S.last_card_refresh_at = 0;
     refreshActiveCardSoon(card, 'file_view changed');
@@ -3408,7 +3472,7 @@
         if (isFileViewKey(e.name)) {
           S.file_view_changes++;
           log('storage change: ' + e.name + ' (file_view) — syncing progress');
-          onFileViewChanged();
+          onFileViewChanged(e.name);
         }
       });
     });
@@ -3458,10 +3522,14 @@
   // 15. Экран диагностики (Lampa.Component)
   // =========================================================================
     function DiagComponent(object) {
-      // v126-style: простой DOM с overflow-y:auto, без Lampa.Scroll (он давал
-      // +многие секунды в init на наших ТВ-устройствах). Навигация — наш
-      // ручной focusDiag/moveDiag. Lampa Navigator выключен через invisible:true,
-      // иначе collectionSet/collectionFocus → бесконечная рекурсия (см. v136).
+      // ВАЖНО (см. lampa-source/src/interaction/activity/activity.js → create):
+      //   let comp = Component.create(object)        // здесь конструктор
+      //   object.activity = new ActivitySlide(...)
+      //   comp.activity = object.activity            // ← activity появляется ПОСЛЕ
+      //   object.activity.create()                   // → comp.create(body)
+      // Поэтому в конструкторе обращаться к `this.activity` ещё нельзя, и весь
+      // тяжёлый рендер обязан жить внутри create()/start(); любое исключение
+      // в конструкторе приведёт Lampa к подмене на `nocomponent` («Здесь пусто»).
       var self = this;
       var outer = $('<div class="cw-diag"></div>');
       var body = $('<div class="cw-diag__scroll"></div>');
@@ -3493,6 +3561,7 @@
 
     function scrollFocusedIntoView() {
       var focused = body.find('.focus').first();
+      if (!focused.length) focused = body.find('.selector').first();
       if (!focused.length) return;
       try {
         var el = focused[0];
@@ -3564,39 +3633,58 @@
     }
 
     this.create = function () {
-      try { buildBody(); } catch (e) { cwError('DiagComponent.create.buildBody', e); }
-      try { dismissEmpty(true); } catch (e) { cwError('DiagComponent.create.dismissEmpty', e); }
+      buildBody();
+      dismissEmpty(true);
     };
-
     this.render = function () {
       return outer;
     };
 
     this.start = function () {
+      try { buildBody(); } catch (e) { cwError('DiagComponent.start.buildBody', e); }
       try { dismissEmpty(false); } catch (e) { cwError('DiagComponent.start.dismissEmpty', e); }
-      try {
-        // invisible:true — мы сами рулим стрелками/фокусом через focusDiag.
-        // НЕ зовём Lampa.Controller.collectionSet/collectionFocus, чтобы не
-        // получить рекурсию через .on('focus', '.selector', ...) (v136).
-        Lampa.Controller.add('content', {
-          invisible: true,
-          toggle: function () { focusDiag(focusIndex || 0); },
-          left: function () { Lampa.Controller.toggle('menu'); },
-          up: function () { moveDiag(-1); },
-          down: function () { moveDiag(1); },
-          right: function () { moveDiag(1); },
-          enter: enterDiag,
-          ok: enterDiag,
-          back: function () { Lampa.Activity.backward(); }
+      setTimeout(function () {
+        safe('bg', function () {
+          Lampa.Background.immediately(Lampa.Utils.cardImgBackground({img: ''}));
         });
-        Lampa.Controller.toggle('content');
+      }, 0);
+      try {
+      Lampa.Controller.add(COMPONENT_ID, {
+        // invisible:true — выключаем Lampa Navigator для нашего экрана.
+        // Мы сами рулим up/down/enter через focusDiag/moveDiag/enterDiag и
+        // не вызываем collectionSet/collectionFocus, иначе Navigator бесконечно
+        // фокусирует наш .selector → triggers .on('focus', '.selector') →
+        // снова collectionFocus → stack overflow (см. v136 RangeError).
+        invisible: true,
+        toggle: function () {
+          focusDiag(focusIndex || 0);
+        },
+        left: function () {
+          Lampa.Controller.toggle('menu');
+        },
+        up: function () {
+          moveDiag(-1);
+        },
+        down: function () {
+          moveDiag(1);
+        },
+        right: function () {
+          moveDiag(1);
+        },
+        enter: enterDiag,
+        ok: enterDiag,
+        back: function () {
+          Lampa.Activity.backward();
+        },
+      });
+      Lampa.Controller.toggle(COMPONENT_ID);
       } catch (e) { cwError('DiagComponent.start.controller', e); }
     };
 
     this.pause = function () {};
     this.stop = function () {};
     this.destroy = function () {
-      try { outer.remove(); } catch (e) {}
+      try { outer.remove(); } catch (e) { cwError('DiagComponent.destroy', e); }
     };
 
     function buildBody() {
@@ -4085,6 +4173,16 @@
       });
     });
     body.append(clearBtn);
+
+    body.on('wheel', function (e) {
+      var oe = e.originalEvent || e;
+      body.scrollTop(body.scrollTop() + (oe.deltaY || 0));
+    });
+    body.on('hover:focus focus mouseenter', '.selector', function () {
+      var idx = body.find('.selector').index(this);
+      if (idx >= 0) focusIndex = idx;
+      setTimeout(scrollFocusedIntoView, 0);
+    });
     outer.append(body);
     __mark('attach listeners + outer');
 
@@ -4123,6 +4221,7 @@
               String(err.stack).replace(/</g, '&lt;') + '</div>'
             );
           }
+          outer.append(body);
         } catch (e2) {}
       }
     }
@@ -4133,7 +4232,7 @@
   // =========================================================================
   function addStyles() {
     var css =
-      '.cw-diag{padding:1.5em;padding-bottom:6rem;box-sizing:border-box}' +
+      '.cw-diag{height:100%;padding:0}' +
       '.cw-diag__scroll{height:100%;max-height:100vh;overflow-y:auto;padding:1.5em;padding-bottom:6rem;box-sizing:border-box}' +
       '.cw-diag__title{font-size:1.6em;font-weight:bold;margin-bottom:1em}' +
       '.cw-diag__row{display:flex;justify-content:space-between;padding:.5em .8em;margin-bottom:.3em;background:rgba(255,255,255,.04);border-radius:.4em;font-size:.95em}' +
