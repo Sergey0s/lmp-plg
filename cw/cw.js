@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '134';
+    var PLUGIN_VERSION = '135';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -3535,11 +3535,21 @@
       built = true;
       try {
 
-    var params = readParams();
+    // ---- timing трассировка (см. v135) ----
+    var __timings = [];
+    var __t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    var __tPrev = __t0;
+    function __mark(label) {
+      var now = (window.performance && performance.now) ? performance.now() : Date.now();
+      __timings.push({ label: label, ms: now - __tPrev, total: now - __t0 });
+      __tPrev = now;
+    }
+
+    var params = readParams();                                      __mark('readParams (' + Object.keys(params).length + ')');
     var keys = Object.keys(params).sort(function (a, b) {
       return (params[b].timestamp || 0) - (params[a].timestamp || 0);
-    });
-    var tsU = torrUrl();
+    });                                                              __mark('sort keys');
+    var tsU = torrUrl();                                             __mark('torrUrl');
 
     body.append(
       '<div class="cw-diag__title">Продолжить · v' + PLUGIN_VERSION + '</div>'
@@ -3602,6 +3612,8 @@
         )
       );
     }
+
+    __mark('top rows');
 
     var actNow =
       Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
@@ -3967,6 +3979,8 @@
       )
     );
 
+    __mark('middle blocks');
+
     body.append('<div class="cw-diag__sect">Сохранённые записи</div>');
     if (!keys.length) {
       body.append(
@@ -3984,6 +3998,7 @@
       }
       body.append(entriesHtml);
     }
+    __mark('saved entries (' + Math.min(keys.length, 50) + ')');
 
     var clearBtn = $(
       '<div class="selector cw-diag__btn">Очистить все записи</div>'
@@ -4012,6 +4027,25 @@
       setTimeout(scrollFocusedIntoView, 0);
     });
     outer.append(body);
+    __mark('attach listeners + outer');
+
+    var __timingsHtml = '';
+    for (var __i = 0; __i < __timings.length; __i++) {
+      var __t = __timings[__i];
+      var __color = __t.ms > 200 ? '#f66' : (__t.ms > 50 ? '#fc7' : '#7c7');
+      __timingsHtml +=
+        '<div style="display:flex;justify-content:space-between;font-family:monospace;font-size:.85em;padding:.15em .3em;border-bottom:1px dashed rgba(255,255,255,.06)">' +
+        '<span style="opacity:.75">' + __t.label + '</span>' +
+        '<span style="color:' + __color + ';font-weight:bold">' + __t.ms.toFixed(1) + ' ms</span>' +
+        '</div>';
+    }
+    var __totalMs = ((window.performance && performance.now) ? performance.now() : Date.now()) - __t0;
+    body.prepend(
+      '<div class="cw-diag__row cw-diag__row--accent" style="display:block;margin-bottom:.6em">' +
+      '<div style="display:flex;justify-content:space-between;font-weight:bold;margin-bottom:.4em">' +
+      '<span>▸ build timing</span><span style="color:' + (__totalMs > 500 ? '#f66' : '#7c7') + '">total ' + __totalMs.toFixed(1) + ' ms</span>' +
+      '</div>' + __timingsHtml + '</div>'
+    );
 
       } catch (err) {
         log('DiagComponent build error:', err && err.message);
