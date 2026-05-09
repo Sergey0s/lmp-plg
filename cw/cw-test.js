@@ -80,6 +80,9 @@ class MiniQuery {
     if (selector !== '.selector') {
       const found = [];
       this.nodes.forEach((node) => collectBySelector(node, selector, found));
+      if (!found.length && selector.charAt(0) === '.') {
+        this.nodes.forEach((node) => collectSyntheticBySelector(node, selector, found));
+      }
       return new MiniQuery(found, selector);
     }
     const total = this.nodes.reduce((sum, n) => sum + (n.selectorCount || 0), 0);
@@ -97,6 +100,11 @@ class MiniQuery {
   }
   addClass(name) { this.nodes.forEach((n) => { n.classes = n.classes || {}; n.classes[name] = true; }); return this; }
   removeClass(name) { this.nodes.forEach((n) => { if (n.classes) delete n.classes[name]; }); return this; }
+  text(value) {
+    if (typeof value === 'undefined') return this.nodes[0] ? (this.nodes[0].text || '') : '';
+    this.nodes.forEach((n) => { n.text = String(value); });
+    return this;
+  }
   scrollTop(value) {
     if (typeof value === 'undefined') return this.nodes[0] ? (this.nodes[0].scrollTop || 0) : 0;
     this.nodes.forEach((n) => { n.scrollTop = value; });
@@ -114,6 +122,29 @@ function collectBySelector(node, selector, out) {
     if (selectors.some((s) => matchesSelector(child, s))) out.push(child);
     collectBySelector(child, selector, out);
   });
+}
+
+function collectSyntheticBySelector(node, selector, out) {
+  if (!node || node.removed) return;
+  const className = selector.slice(1);
+  if (!String(node.html || '').includes(className)) return;
+  node.synthetic = node.synthetic || {};
+  if (!node.synthetic[className]) {
+    node.synthetic[className] = {
+      __miniNode: true,
+      html: '',
+      text: '',
+      children: [],
+      handlers: {},
+      classes: {[className]: true},
+      selectorCount: 0,
+      offsetTop: 0,
+      offsetHeight: 28,
+      isConnected: true,
+      parent: node,
+    };
+  }
+  out.push(node.synthetic[className]);
 }
 
 function matchesSelector(node, selector) {
@@ -145,6 +176,7 @@ function nodeFromHtml(html) {
 }
 
 const menuList = nodeFromHtml('<div class="menu__list"></div>');
+const bodyChildren = [];
 
 function $(arg) {
   if (arg instanceof MiniQuery) return arg;
@@ -170,6 +202,11 @@ let startCalls = 0;
 let noties = [];
 let playerPlayCalls = [];
 let xhrRequests = [];
+let torrentGetResponse = {
+  preloaded_bytes: 10,
+  preload_size: 100,
+  download_speed: 2048,
+};
 const timelineStore = {};
 
 const Lampa = {
@@ -206,6 +243,8 @@ const Lampa = {
     },
     enabled() { return {name: controllerName || 'content'}; },
     clear() {},
+    collectionSet() {},
+    collectionFocus() {},
   },
   Noty: {
     show(text) { noties.push(String(text)); },
@@ -284,7 +323,7 @@ const sandbox = {
     performance: {memory: {usedJSHeapSize: 10_000_000, totalJSHeapSize: 10_000_000, jsHeapSizeLimit: 1_000_000_000}},
   },
   document: {
-    body: {appendChild() {}},
+    body: {appendChild(node) { bodyChildren.push(node); }},
     createElement() { return {style: {}, children: [], appendChild() {}, remove() {}}; },
     getElementById() { return null; },
     addEventListener() {},
@@ -361,11 +400,7 @@ MockXMLHttpRequest.prototype.send = function (body) {
     let payload = {};
     try { payload = body ? JSON.parse(body) : {}; } catch (e) {}
     if (payload.action === 'get') {
-      this.responseText = JSON.stringify({
-        preloaded_bytes: 10,
-        preload_size: 100,
-        download_speed: 2048,
-      });
+      this.responseText = JSON.stringify(torrentGetResponse);
     } else {
       this.responseText = JSON.stringify({hash: '0123456789abcdef0123456789abcdef01234567'});
     }
@@ -537,6 +572,133 @@ if (!refreshedEntry || refreshedEntry.time !== 2050 || refreshedEntry.percent !=
 }
 console.log('external refresh OK:', '20:34 -> 34:10');
 
+storage.file_view_756763 = Object.assign({}, storage.file_view_756763 || {}, {
+  [continueHash]: {
+    hash: continueHash,
+    percent: 100,
+    time: 0,
+    duration: 0,
+  },
+});
+Lampa.Storage.set('file_view_756763', storage.file_view_756763);
+const afterZeroEnded = storage.continue_watch_params[continueHash];
+if (!afterZeroEnded || afterZeroEnded.time !== 2050 || afterZeroEnded.duration !== 3600) {
+  throw new Error('External 100% time=0 update should not erase saved resume point: ' + JSON.stringify(afterZeroEnded));
+}
+console.log('external ended zero-time guard OK:', afterZeroEnded.time);
+
+const smartTitle = 'Smoke SmartNext Series';
+addSeriesEntry(smartTitle, 1, 7, {
+  percent: 99.7,
+  time: 2380,
+  duration: 2400,
+  file_index: 7,
+  timestamp: Date.now() + 7000,
+});
+addSeriesEntry(smartTitle, 1, 8, {
+  percent: 0,
+  time: 0,
+  duration: 2400,
+  file_index: 8,
+  timestamp: Date.now() + 6000,
+});
+const smartMovie = {title: smartTitle, name: smartTitle, number_of_seasons: 1};
+const smartRender = makeCardRender();
+activeActivity = {component: 'full', movie: smartMovie, activity: {render: () => smartRender}};
+storage.cw_buffer_modal = false;
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: smartMovie},
+  object: activeActivity,
+});
+playerPlayCalls = [];
+const smartBtn = smartRender.find('.button--continue-watch').first();
+if (!smartBtn.length) throw new Error('Smart-next continue button was not injected');
+smartBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 0) throw new Error('Smart-next should open confirm before playing');
+if (controllerName !== 'cw_center_confirm') throw new Error('Smart-next confirm controller was not opened: ' + controllerName);
+let smartModal = bodyChildren[bodyChildren.length - 1];
+const smartTitleText = $(smartModal).find('.cw-cnf__title').text();
+if (!/99%/.test(smartTitleText) || /100%/.test(smartTitleText)) {
+  throw new Error('Smart-next title should floor 99.7% to 99%, got: ' + smartTitleText);
+}
+$(smartModal).find('.cw-cnf__btn--secondary').trigger('hover:enter');
+if (playerPlayCalls.length !== 1) throw new Error('Smart-next secondary should start current episode');
+if (playerPlayCalls[0].episode !== 7 || playerPlayCalls[0].position !== 2380) {
+  throw new Error('Smart-next secondary should resume S1E7 at 2380s: ' + JSON.stringify(playerPlayCalls[0]));
+}
+playerPlayCalls = [];
+smartBtn.trigger('hover:enter');
+smartModal = bodyChildren[bodyChildren.length - 1];
+$(smartModal).find('.cw-cnf__btn--primary').trigger('hover:enter');
+if (playerPlayCalls.length !== 1) throw new Error('Smart-next primary should start next episode');
+if (playerPlayCalls[0].episode !== 8 || ![-1, 0].includes(playerPlayCalls[0].position)) {
+  throw new Error('Smart-next primary should start S1E8 from beginning: ' + JSON.stringify(playerPlayCalls[0]));
+}
+console.log('smart-next confirm OK:', smartTitleText);
+
+const bufferTitle = 'Smoke Buffer Movie';
+addMovieContinueEntry(bufferTitle);
+const bufferMovie = {title: bufferTitle, name: bufferTitle};
+const bufferRender = makeCardRender();
+storage.cw_buffer_modal = true;
+storage.cw_buffer_pct = 10;
+activeActivity = {component: 'full', movie: bufferMovie, activity: {render: () => bufferRender}};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: bufferMovie},
+  object: activeActivity,
+});
+xhrRequests = [];
+playerPlayCalls = [];
+const bufferBtn = bufferRender.find('.button--continue-watch').first();
+if (!bufferBtn.length) throw new Error('Buffer continue button was not injected');
+bufferBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 1) {
+  throw new Error('Buffer modal should auto-launch after preload threshold, calls=' + playerPlayCalls.length);
+}
+const bufferPreloadReq = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+if (!bufferPreloadReq || bufferPreloadReq.url.indexOf('preload') === -1) {
+  throw new Error('Buffer modal should trigger current-file preload before polling');
+}
+storage.cw_buffer_modal = false;
+console.log('buffer modal OK:', playerPlayCalls[0].position);
+
+const deadBufferTitle = 'Smoke Dead Buffer Movie';
+addMovieContinueEntry(deadBufferTitle);
+const deadBufferMovie = {title: deadBufferTitle, name: deadBufferTitle};
+const deadBufferRender = makeCardRender();
+storage.cw_buffer_modal = true;
+torrentGetResponse = {
+  preloaded_bytes: 0,
+  preload_size: 0,
+  download_speed: 0,
+  peers: 0,
+};
+activeActivity = {component: 'full', movie: deadBufferMovie, activity: {render: () => deadBufferRender}};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: deadBufferMovie},
+  object: activeActivity,
+});
+playerPlayCalls = [];
+const deadBufferBtn = deadBufferRender.find('.button--continue-watch').first();
+if (!deadBufferBtn.length) throw new Error('Dead-buffer continue button was not injected');
+deadBufferBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 0) {
+  throw new Error('Dead buffer must not auto-launch player, calls=' + playerPlayCalls.length);
+}
+if (Lampa.Controller.controllers.cw_buffer_modal && Lampa.Controller.controllers.cw_buffer_modal.back) {
+  Lampa.Controller.controllers.cw_buffer_modal.back();
+}
+storage.cw_buffer_modal = false;
+torrentGetResponse = {
+  preloaded_bytes: 10,
+  preload_size: 100,
+  download_speed: 2048,
+};
+console.log('dead buffer no-autoplay OK');
+
 const prefetchTitle = 'Smoke Prefetch Series';
 addSeriesEntry(prefetchTitle, 2, 12, {
   percent: 99,
@@ -612,6 +774,47 @@ if (!changedIndexPreload || changedIndexPreload.url.indexOf('index=14') === -1) 
   throw new Error('Changed-index prefetch should call preload with index=14');
 }
 console.log('prefetch OK:', changedIndexState.last_index, changedIndexState.last_pct + '%');
+
+const sameTorrentBufferTitle = 'Smoke Same Torrent Buffer Movie';
+const sameTorrentBufferHash = Lampa.Utils.hash(sameTorrentBufferTitle);
+storage.continue_watch_params[sameTorrentBufferHash] = {
+  title: sameTorrentBufferTitle,
+  percent: 25,
+  time: 600,
+  duration: 2400,
+  timestamp: Date.now() + 9000,
+  torrent_link: nextPrefetchEntry.torrent_link,
+  file_name: `${sameTorrentBufferTitle} S02 E15.mkv`,
+  file_index: 15,
+};
+notifyContinueStorageChanged();
+const sameTorrentBufferMovie = {title: sameTorrentBufferTitle, name: sameTorrentBufferTitle};
+const sameTorrentBufferRender = makeCardRender();
+storage.cw_buffer_modal = true;
+activeActivity = {
+  component: 'full',
+  movie: sameTorrentBufferMovie,
+  activity: {render: () => sameTorrentBufferRender},
+};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: sameTorrentBufferMovie},
+  object: activeActivity,
+});
+xhrRequests = [];
+playerPlayCalls = [];
+const sameTorrentBufferBtn = sameTorrentBufferRender.find('.button--continue-watch').first();
+if (!sameTorrentBufferBtn.length) throw new Error('Same-torrent buffer button was not injected');
+sameTorrentBufferBtn.trigger('hover:enter');
+const sameTorrentBufferPreload = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+if (!sameTorrentBufferPreload || sameTorrentBufferPreload.url.indexOf('index=15') === -1) {
+  throw new Error('Same-torrent buffer should preload current file index=15, got: ' + (sameTorrentBufferPreload && sameTorrentBufferPreload.url));
+}
+if (playerPlayCalls.length !== 1 || playerPlayCalls[0].position !== 600) {
+  throw new Error('Same-torrent buffer should launch current movie at saved position: ' + JSON.stringify(playerPlayCalls[0]));
+}
+storage.cw_buffer_modal = false;
+console.log('same-torrent buffer index OK:', sameTorrentBufferPreload.url.match(/index=\d+/)[0]);
 
 const autoNextTitle = 'Smoke AutoNext Series';
 const autoNextMovie = {title: autoNextTitle, name: autoNextTitle, number_of_seasons: 1};
