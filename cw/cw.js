@@ -7,7 +7,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '125';
+    var PLUGIN_VERSION = '126';
 
     if (window.continue_watch_plugin) return;
     window.continue_watch_plugin = PLUGIN_VERSION;
@@ -2503,6 +2503,7 @@
     function DiagComponent() {
         var outer = $('<div class="cw-diag"></div>');
         var body = $('<div class="cw-diag__scroll"></div>');
+        var focusIndex = 0;
 
         function row(label, value, accent) {
             return $('<div class="selector cw-diag__row' + (accent ? ' cw-diag__row--accent' : '') + '">' +
@@ -2525,6 +2526,28 @@
             } catch (e) {}
         }
 
+        function focusDiag(index) {
+            var items = body.find('.selector');
+            if (!items.length) return;
+            if (index < 0) index = 0;
+            if (index >= items.length) index = items.length - 1;
+            focusIndex = index;
+            items.removeClass('focus');
+            var el = items.eq(focusIndex);
+            el.addClass('focus');
+            scrollFocusedIntoView();
+        }
+
+        function moveDiag(delta) {
+            focusDiag(focusIndex + delta);
+        }
+
+        function enterDiag() {
+            var el = body.find('.selector').eq(focusIndex);
+            if (!el.length) return;
+            el.trigger('hover:enter');
+        }
+
         function entry(p, hash) {
             var sub = (p.season && p.episode) ? ('S' + p.season + ' E' + p.episode) : 'фильм';
             var meta = (p.percent ? Math.round(p.percent) : 0) + '% · ' +
@@ -2542,31 +2565,26 @@
 
         this.start = function () {
             safe('bg', function () { Lampa.Background.immediately(Lampa.Utils.cardImgBackground({ img: '' })); });
-            Lampa.Controller.add('content', {
+            Lampa.Controller.add(COMPONENT_ID, {
                 toggle: function () {
                     Lampa.Controller.collectionSet(body);
                     var first = body.find('.selector').first()[0];
                     Lampa.Controller.collectionFocus(first || false, body);
-                    setTimeout(scrollFocusedIntoView, 50);
+                    focusDiag(0);
                 },
                 left: function () { Lampa.Controller.toggle('menu'); },
                 up: function () {
-                    try {
-                        if (Navigator.canmove && Navigator.canmove('up')) Navigator.move('up');
-                        else body.scrollTop(Math.max(0, body.scrollTop() - 220));
-                    } catch (e) { body.scrollTop(Math.max(0, body.scrollTop() - 220)); }
-                    setTimeout(scrollFocusedIntoView, 0);
+                    moveDiag(-1);
                 },
                 down: function () {
-                    try {
-                        if (Navigator.canmove && Navigator.canmove('down')) Navigator.move('down');
-                        else body.scrollTop(body.scrollTop() + 220);
-                    } catch (e) { body.scrollTop(body.scrollTop() + 220); }
-                    setTimeout(scrollFocusedIntoView, 0);
+                    moveDiag(1);
                 },
+                right: function () { moveDiag(1); },
+                enter: enterDiag,
+                ok: enterDiag,
                 back: function () { Lampa.Activity.backward(); }
             });
-            Lampa.Controller.toggle('content');
+            Lampa.Controller.toggle(COMPONENT_ID);
         };
 
         this.pause = function () {};
@@ -2788,6 +2806,8 @@
             body.scrollTop(body.scrollTop() + (oe.deltaY || 0));
         });
         body.on('hover:focus focus mouseenter', '.selector', function () {
+            var idx = body.find('.selector').index(this);
+            if (idx >= 0) focusIndex = idx;
             setTimeout(scrollFocusedIntoView, 0);
         });
         outer.append(body);
@@ -2803,6 +2823,7 @@
             '.cw-diag__title{font-size:1.6em;font-weight:bold;margin-bottom:1em}' +
             '.cw-diag__row{display:flex;justify-content:space-between;padding:.5em .8em;margin-bottom:.3em;background:rgba(255,255,255,.04);border-radius:.4em;font-size:.95em}' +
             '.cw-diag__row--accent{background:rgba(124,58,237,.15)}' +
+            '.cw-diag__row.focus{background:#fff;color:#000}' +
             '.cw-diag__label{opacity:.7}' +
             '.cw-diag__value{font-family:monospace;text-align:right;max-width:60%;word-break:break-all}' +
             '.cw-diag__sect{margin:1.4em 0 .7em;font-size:1.2em;font-weight:bold;border-left:4px solid #7c3aed;padding-left:.5em}' +
