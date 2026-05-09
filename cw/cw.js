@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '135';
+    var PLUGIN_VERSION = '136';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -185,6 +185,77 @@
       Lampa.Noty.show(text);
     } catch (e) {}
   }
+
+  // ===== длинный toast (свой), нужен потому что Lampa.Noty гасится за ~1.5с
+  // и не успеваешь прочитать стек ошибки. Показываем на 10с, до 4 одновременно.
+  // Хранится глобально (window.cw_errors) чтобы можно было вызвать cw.errors().
+  var CW_TOAST_MS = 10000;
+  var CW_TOAST_MAX = 4;
+  function cwToast(msg, kind) {
+    if (!window.cw_errors) window.cw_errors = [];
+    window.cw_errors.push({ at: Date.now(), kind: kind || 'info', msg: String(msg) });
+    if (window.cw_errors.length > 50) window.cw_errors.shift();
+    try {
+      var box = document.getElementById('cw-toast-box');
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'cw-toast-box';
+        box.style.cssText =
+          'position:fixed;left:1em;bottom:1em;z-index:99999;display:flex;flex-direction:column;gap:.5em;max-width:80vw;pointer-events:none';
+        document.body.appendChild(box);
+      }
+      while (box.children.length >= CW_TOAST_MAX) box.removeChild(box.firstChild);
+      var color = kind === 'err' ? '#f55' : kind === 'warn' ? '#fc7' : '#7c7';
+      var el = document.createElement('div');
+      el.style.cssText =
+        'background:rgba(0,0,0,.85);border-left:.3em solid ' + color +
+        ';padding:.7em 1em;border-radius:.4em;color:#fff;font-size:.95em;' +
+        'font-family:monospace;white-space:pre-wrap;word-break:break-all;' +
+        'box-shadow:0 4px 18px rgba(0,0,0,.5);max-height:40vh;overflow-y:auto';
+      el.textContent = '[cw] ' + msg;
+      box.appendChild(el);
+      setTimeout(function () { try { el.remove(); } catch (e) {} }, CW_TOAST_MS);
+    } catch (e) {}
+  }
+
+  function cwError(label, err) {
+    var msg = label + ': ' + ((err && err.message) || err || 'unknown');
+    if (err && err.stack) msg += '\n' + String(err.stack).split('\n').slice(0, 6).join('\n');
+    cwToast(msg, 'err');
+    try { console.warn('[CW]', label, err && err.stack ? err.stack : err); } catch (e) {}
+  }
+
+  // глобальный перехватчик: показываем только ошибки, что прилетели из нашего плагина
+  // (по filename: cw.js / lmp-plg / sergey0s). Это не зашумляет нас ошибками самой Lampa.
+  (function () {
+    if (window.__cw_onerror_installed) return;
+    window.__cw_onerror_installed = true;
+    window.addEventListener('error', function (e) {
+      try {
+        var fn = (e && (e.filename || (e.error && e.error.fileName))) || '';
+        var src = String(fn).toLowerCase();
+        var stack = (e && e.error && e.error.stack) || '';
+        var fromUs =
+          src.indexOf('cw.js') !== -1 ||
+          src.indexOf('lmp-plg') !== -1 ||
+          src.indexOf('sergey0s') !== -1 ||
+          stack.indexOf('cw.js') !== -1;
+        if (!fromUs) return;
+        cwError(
+          'window.error ' + (e.lineno || '?') + ':' + (e.colno || '?'),
+          e.error || e.message
+        );
+      } catch (err) {}
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      try {
+        var r = e && (e.reason || e.detail);
+        var stack = (r && r.stack) || '';
+        if (stack.indexOf('cw.js') === -1 && stack.indexOf('lmp-plg') === -1) return;
+        cwError('unhandled promise', r);
+      } catch (err) {}
+    });
+  })();
 
   function formatTime(seconds) {
     if (!seconds) return '';
@@ -3489,13 +3560,14 @@
     };
 
     this.start = function () {
-      buildBody();
-      dismissEmpty();
+      try { buildBody(); } catch (e) { cwError('DiagComponent.start.buildBody', e); }
+      try { dismissEmpty(); } catch (e) { cwError('DiagComponent.start.dismissEmpty', e); }
       setTimeout(function () {
         safe('bg', function () {
           Lampa.Background.immediately(Lampa.Utils.cardImgBackground({img: ''}));
         });
       }, 0);
+      try {
       Lampa.Controller.add(COMPONENT_ID, {
         toggle: function () {
           Lampa.Controller.collectionSet(body);
@@ -3522,12 +3594,13 @@
         },
       });
       Lampa.Controller.toggle(COMPONENT_ID);
+      } catch (e) { cwError('DiagComponent.start.controller', e); }
     };
 
     this.pause = function () {};
     this.stop = function () {};
     this.destroy = function () {
-      outer.remove();
+      try { outer.remove(); } catch (e) { cwError('DiagComponent.destroy', e); }
     };
 
     function buildBody() {
@@ -4211,6 +4284,12 @@
         log('debug=' + DEBUG);
         if (window.console) console.log('[CW] debug=' + DEBUG);
       },
+      errors: function (n) {
+        var arr = (window.cw_errors || []).slice(-(n || 20));
+        try { console.table(arr); } catch (e) { console.log(arr); }
+        return arr;
+      },
+      toast: function (msg, kind) { cwToast(msg, kind || 'info'); },
       dump: function () {
         var p = readParams();
         console.log('[CW] key:', S.active_key, 'count:', Object.keys(p).length);
