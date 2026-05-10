@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '149';
+    var PLUGIN_VERSION = '150';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -1132,8 +1132,6 @@
             path: file.path,
             is_file: true,
           });
-          if (movie.number_of_seasons && info.season !== currentParams.season)
-            return;
           var key = info.season + '_' + info.episode;
           if (seen[key]) return;
 
@@ -1195,6 +1193,7 @@
 
       if (movie.number_of_seasons)
         playlist.sort(function (a, b) {
+          if (a.season !== b.season) return a.season - b.season;
           return a.episode - b.episode;
         });
       done(playlist);
