@@ -222,6 +222,10 @@ let torrentGetResponse = {
   preload_size: 100,
   download_speed: 2048,
 };
+let torserverFileStats = [
+  {id: 1, path: 'Smoke AutoNext Series S01 E01.mkv'},
+  {id: 2, path: 'Smoke AutoNext Series S01 E02.mkv'},
+];
 const timelineStore = {};
 
 const Lampa = {
@@ -310,10 +314,7 @@ const Lampa = {
     },
     files(hash, ok) {
       ok({
-        file_stats: [
-          {id: 1, path: 'Smoke AutoNext Series S01 E01.mkv'},
-          {id: 2, path: 'Smoke AutoNext Series S01 E02.mkv'},
-        ],
+        file_stats: torserverFileStats,
       });
     },
   },
@@ -1072,6 +1073,53 @@ if (afterAutoNext.file_index !== 2) {
 }
 sendPlayerDestroy();
 console.log('auto-next timeline OK:', afterAutoNext.percent + '%', afterAutoNext.time + 's');
+
+const seasonBoundaryTitle = 'Smoke Season Boundary Series';
+const seasonBoundaryMovie = {title: seasonBoundaryTitle, name: seasonBoundaryTitle, number_of_seasons: 5};
+const seasonBoundaryLink = 'magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc';
+torserverFileStats = [
+  {id: 21, path: `${seasonBoundaryTitle} S02 E21.mkv`},
+  {id: 22, path: `${seasonBoundaryTitle} S02 E22.mkv`},
+  {id: 23, path: `${seasonBoundaryTitle} S03 E01.mkv`},
+  {id: 24, path: `${seasonBoundaryTitle} S03 E02.mkv`},
+];
+addSeriesEntry(seasonBoundaryTitle, 2, 22, {
+  percent: 40,
+  time: 900,
+  file_index: 22,
+  torrent_link: seasonBoundaryLink,
+  file_name: `${seasonBoundaryTitle} S02 E22.mkv`,
+  timestamp: Date.now() + 9500,
+});
+const seasonBoundaryRender = makeCardRender();
+playerPlayCalls = [];
+storage.cw_buffer_modal = false;
+sandbox.window.cw.prefetch(false);
+activeActivity = {
+  component: 'full',
+  movie: seasonBoundaryMovie,
+  activity: {render: () => seasonBoundaryRender},
+};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: seasonBoundaryMovie},
+  object: activeActivity,
+});
+const seasonBoundaryBtn = seasonBoundaryRender.find('.button--continue-watch').first();
+if (!seasonBoundaryBtn.length) throw new Error('Season-boundary continue button was not injected');
+seasonBoundaryBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 1) throw new Error('Season-boundary click did not start player');
+const seasonBoundaryPlaylist = playerPlayCalls[0].playlist || [];
+const seasonBoundaryKeys = seasonBoundaryPlaylist.map((item) => `S${item.season}E${item.episode}`);
+if (!seasonBoundaryKeys.includes('S3E1')) {
+  throw new Error('Playlist should include S3E1 after S2E22: ' + seasonBoundaryKeys.join(', '));
+}
+const s2e22Index = seasonBoundaryKeys.indexOf('S2E22');
+const s3e1Index = seasonBoundaryKeys.indexOf('S3E1');
+if (s2e22Index === -1 || s3e1Index === -1 || s3e1Index <= s2e22Index) {
+  throw new Error('Playlist should sort by season then episode: ' + seasonBoundaryKeys.join(', '));
+}
+console.log('season-boundary playlist OK:', seasonBoundaryKeys.join(' -> '));
 
 const duplicateTitle = 'Smoke Duplicate Series';
 addSeriesEntry(duplicateTitle, 2, 4, {
