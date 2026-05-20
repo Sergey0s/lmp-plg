@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '150';
+    var PLUGIN_VERSION = '151';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -90,6 +90,8 @@
     last_full_title: null,
     last_full_movie: null,
     last_full_render: null,
+    last_button_signature: null,
+    last_button_signature_at: 0,
     last_play_url: null,
     last_lookup: null,
     last_tick: 0,
@@ -1511,8 +1513,8 @@
 
       if (!activeMovie || !render) return;
       if (pickTitle(activeMovie) !== expectedTitle) return;
-      var oldBtn = render.find('.button--continue-watch').first();
-      if (oldBtn.length) oldBtn.remove();
+      // НЕ удаляем кнопку руками — _runInject сам сравнит сигнатуру
+      // и пропустит no-op рендер (см. бага «карточка отрисовывается 2-3 раза»).
       _runInject(activeMovie, render, {skipPrefetch: true});
     });
   }
@@ -2349,6 +2351,14 @@
       });
     }
 
+    // ВАЖНО (баг «Продолжить показывает середину прошлого эпизода»):
+    // фиксируем выбор юзера в timestamp'е этой записи. Дальше даже если
+    // внешний плеер закроется без событий, findStreamParams вернёт именно
+    // запущенный эпизод — а не sibling-эпизод со случайно более свежим
+    // timestamp'ом (например, stub из loadEpisodesPlaylist или старый
+    // flushHashFromTimeline предыдущей сессии).
+    touchEntryTimestamp(hash);
+
     var go = function () {
       startPlayback(movie, params, url, timeline, opts);
     };
@@ -2654,7 +2664,10 @@
   // может вернуться поверх нашей кнопки. Делаем несколько дешёвых повторов.
   function scheduleCardButtonRefresh(playedCard) {
     var expectedTitle = pickTitle(playedCard);
-    var delays = [250, 800, 1600, 3200, 5200];
+    // 3 попыток достаточно: _runInject теперь идемпотентен через сигнатуру,
+    // лишние повторы только нагружают Lampa.Controller.collectionFocus
+    // и заставляют курсор «прыгать» между Продолжить и Смотреть.
+    var delays = [300, 1200, 3000];
 
     for (var i = 0; i < delays.length; i++) {
       (function (delay) {
@@ -2677,8 +2690,6 @@
               (act.activity && act.activity.render && act.activity.render());
             if (!movie || !render) return;
             if (expectedTitle && pickTitle(movie) !== expectedTitle) return;
-            var oldBtn = render.find('.button--continue-watch').first();
-            if (oldBtn.length) oldBtn.remove();
             _runInject(movie, render, {skipPrefetch: true});
             log(
               'card refresh after player destroy: delay=' +
@@ -3234,10 +3245,24 @@
     }
   }
 
+  // Сигнатура кнопки — состоит из «видимых» свойств: тайтл/сезон/эпизод/%/время.
+  // Если она совпадает с уже отрисованной — не пересоздаём DOM (см. бага «карточка
+  // отрисовывается 2-3 раза, курсор скачет между Продолжить и Смотреть»):
+  // remove+inject триггерит Lampa.Controller.collectionSet/collectionFocus,
+  // который дёргает фокус и расхолаживает пользователя.
+  function buttonSignature(movie, params, percent, timeSec) {
+    return [
+      pickTitle(movie) || '',
+      params.season || 0,
+      params.episode || 0,
+      Math.round((percent || 0) * 10),
+      Math.round(timeSec || 0),
+    ].join('|');
+  }
+
   function _runInject(movie, render, opts) {
     opts = opts || {};
     if (!movie || !render || !render.find) return;
-    if (render.find('.button--continue-watch').length) return;
 
     var target = pickContinueTarget(movie);
     if (!target) {
@@ -3258,18 +3283,41 @@
     }
 
     var percent = 0,
+      timeSec = 0,
       timeStr = '';
     var hash = generateHash(movie, params.season, params.episode);
     var view = safe('Timeline.view', function () {
       return Lampa.Timeline.view(hash);
     });
-    if (view && view.percent > 0) {
-      percent = view.percent;
-      timeStr = formatTime(view.time);
-    } else if (params.time) {
-      percent = params.percent || 0;
-      timeStr = formatTime(params.time);
+    // ВАЖНО (баг «кнопка показывает середину прошлого эпизода»):
+    // Lampa.Timeline.view(hash) — внутренний in-memory кэш, который НЕ
+    // обновляется нашим syncEntryFromFileView'ом и может вернуть стейл
+    // с предыдущей сессии. Используем его только пока эпизод реально играется
+    // (S.last_player_hash === hash), в остальных случаях доверяем нашему
+    // params (он только что был синхронизирован из file_view) и берём ту
+    // позицию, которая БОЛЬШЕ — чтобы не показать юзеру случайно более старую.
+    var liveHash = S.last_player_hash || S.session_play_hash;
+    var isLive = liveHash === hash;
+    var pTime = params.time || 0;
+    var pPct = params.percent || 0;
+    var vTime = (view && view.time) || 0;
+    var vPct = (view && view.percent) || 0;
+
+    if (isLive && vTime > 0) {
+      timeSec = vTime;
+      percent = vPct;
+    } else if (pTime > 0 || pPct > 0) {
+      timeSec = pTime;
+      percent = pPct;
+      if (vTime > pTime) {
+        timeSec = vTime;
+        percent = vPct;
+      }
+    } else if (vTime > 0 || vPct > 0) {
+      timeSec = vTime;
+      percent = vPct;
     }
+    if (timeSec > 0) timeStr = formatTime(timeSec);
 
     var label = 'Продолжить';
     if (params.season && params.episode)
@@ -3277,7 +3325,26 @@
     if (timeStr)
       label += ' <span class="cw-btn__time">(' + timeStr + ')</span>';
 
+    var sig = buttonSignature(movie, params, percent, timeSec);
+    var existing = render.find('.button--continue-watch').first();
+    if (existing.length) {
+      var existingSig =
+        (existing[0] && (existing[0].cwSig || (existing[0].dataset && existing[0].dataset.cwSig))) ||
+        '';
+      if (existingSig === sig) {
+        S.last_button_signature = sig;
+        S.last_button_signature_at = Date.now();
+        log('button refresh skipped: same signature (' + sig + ')');
+        return;
+      }
+      existing.remove();
+    }
+
     var btn = $(buildButtonHtml(((percent * 65.97) / 100).toFixed(2), label));
+    if (btn[0]) {
+      btn[0].cwSig = sig;
+      if (btn[0].setAttribute) btn[0].setAttribute('data-cw-sig', sig);
+    }
     btn.on('hover:enter', function () {
       onClickContinue(movie, this, render, target);
     });
@@ -3292,6 +3359,8 @@
     }
 
     S.button_injected++;
+    S.last_button_signature = sig;
+    S.last_button_signature_at = Date.now();
     log(
       'button INJECTED #' +
         S.button_injected +
@@ -3300,7 +3369,9 @@
         ' hasNext=' +
         !!target.hasNext +
         ' %=' +
-        percent
+        percent +
+        ' sig=' +
+        sig
     );
 
     lockButtonFocus(render, btn);
@@ -3427,11 +3498,64 @@
     return true;
   }
 
+  // Сравнение значимых полей записи (для синка из file_view).
+  // Если file_view не принёс ничего нового — пропускаем updateEntry,
+  // иначе мы тронем timestamp у эпизода, который реально не двигался,
+  // и пересортируем findStreamParams в его пользу.
+  function fileViewHasFreshData(hash, road) {
+    if (!hash || !road) return false;
+    var existing = (readParams() || {})[hash];
+    if (!existing) return true;
+    var pct = typeof road.percent === 'number' ? road.percent : 0;
+    var t = road.time || 0;
+    var dur = road.duration || 0;
+    return (
+      (pct > 0 && pct !== existing.percent) ||
+      (t > 0 && t !== existing.time) ||
+      (dur > 0 && dur !== existing.duration)
+    );
+  }
+
+  // Прочитать все file_view-ключи и применить sync для каждой записи, которую
+  // мы уже знаем в continue_watch_params. Нужно потому что:
+  //  - внешний плеер (ViMu/SlimBox/MX) может закрыться без player.destroy,
+  //    и S.last_player_hash/session_play_hash могут указывать «не туда»;
+  //  - после рестарта Lampa эти переменные == null, и onFileViewChanged
+  //    раньше ничего не синкал — кнопка показывала старую позицию.
+  function syncAllKnownFileViewEntries(preferredKey) {
+    safe('syncAllFileView', function () {
+      var keys = timelineStorageKeys(preferredKey);
+      if (!keys.length) return;
+      var ours = readParams() || {};
+      var seen = {};
+      var synced = 0;
+      for (var i = 0; i < keys.length; i++) {
+        var fv =
+          safe('fv.readAll', function () {
+            return Lampa.Storage.get(keys[i], {});
+          }) || {};
+        for (var hash in fv) {
+          if (seen[hash]) continue;
+          if (!ours[hash]) continue;
+          seen[hash] = 1;
+          if (!fileViewHasFreshData(hash, fv[hash])) continue;
+          if (syncEntryFromFileView(hash, keys[i])) synced++;
+        }
+      }
+      if (synced) log('file_view bulk sync: ' + synced + ' entries updated');
+    });
+  }
+
   function onFileViewChanged(name) {
     var card =
       S.last_player_card || S.session_play_card || S.last_launched_card;
     var h = S.last_player_hash || S.session_play_hash;
     if (h) syncEntryFromFileView(h, name);
+    // На случай когда S.last_player_hash указывает «не туда» (внешний плеер
+    // не вызвал player.destroy) или вовсе null (после рестарта Lampa) —
+    // дотягиваем актуальное состояние file_view'а для всех известных нам
+    // записей, иначе кнопка «Продолжить» покажет позицию из прошлого захода.
+    syncAllKnownFileViewEntries(name);
     if (!card) return;
     S.last_card_refresh_at = 0;
     refreshActiveCardSoon(card, 'file_view changed');
