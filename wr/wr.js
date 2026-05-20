@@ -8,35 +8,30 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.2.0';
+    var PLUGIN_VERSION = '2.1.8';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
     var PLUGIN_AUTHOR_URL = 'https://' + PLUGIN_AUTHOR_LABEL;
 
-    // Логотипы тайлов рендерятся ~150-180px по высоте — 240px ширины более
-    // чем достаточно. Раньше тянули 960px (200-300KB каждый), что давало
-    // ~2-3MB трафика только на иконки при первом открытии плагина.
-    var IMG_WWE_RAW       = 'https://upload.wikimedia.org/wikipedia/commons/thumb/8/86/WWE_RAW_Logo_2025.svg/240px-WWE_RAW_Logo_2025.svg.png';
-    var IMG_WWE_SMACKDOWN = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c9/WWE_SmackDown_%282024%29_Logo.svg/240px-WWE_SmackDown_%282024%29_Logo.svg.png';
-    var IMG_AEW_DYNAMITE  = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/ce/AEW_Dynamite_logo_%28simplified%29.jpg/240px-AEW_Dynamite_logo_%28simplified%29.jpg';
-    var IMG_AEW_COLLISION = 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/All_Elite_Wrestling_logo_2024.svg/240px-All_Elite_Wrestling_logo_2024.svg.png';
-    var IMG_TNA_IMPACT    = 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/02/TNA_Impact%21_2024.png/240px-TNA_Impact%21_2024.png';
-    var IMG_PPV           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6c/Standard_WrestleMania_logo_from_2019_to_present.png/240px-Standard_WrestleMania_logo_from_2019_to_present.png';
-    var IMG_UFC           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/UFC_Logo.svg/240px-UFC_Logo.svg.png';
-    var IMG_BKFC          = 'https://upload.wikimedia.org/wikipedia/commons/thumb/f/f0/Bkfc-logo.png/240px-Bkfc-logo.png';
+    var IMG_WWE_RAW       = 'https://upload.wikimedia.org/wikipedia/commons/thumb/8/86/WWE_RAW_Logo_2025.svg/960px-WWE_RAW_Logo_2025.svg.png';
+    var IMG_WWE_SMACKDOWN = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c9/WWE_SmackDown_%282024%29_Logo.svg/960px-WWE_SmackDown_%282024%29_Logo.svg.png';
+    var IMG_AEW_DYNAMITE  = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/ce/AEW_Dynamite_logo_%28simplified%29.jpg/960px-AEW_Dynamite_logo_%28simplified%29.jpg';
+    var IMG_AEW_COLLISION = 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/All_Elite_Wrestling_logo_2024.svg/960px-All_Elite_Wrestling_logo_2024.svg.png';
+    var IMG_TNA_IMPACT    = 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/02/TNA_Impact%21_2024.png/960px-TNA_Impact%21_2024.png';
+    var IMG_PPV           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6c/Standard_WrestleMania_logo_from_2019_to_present.png/960px-Standard_WrestleMania_logo_from_2019_to_present.png';
+    var IMG_UFC           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/UFC_Logo.svg/960px-UFC_Logo.svg.png';
+    var IMG_BKFC          = 'https://upload.wikimedia.org/wikipedia/commons/thumb/f/f0/Bkfc-logo.png/960px-Bkfc-logo.png';
 
-    // Backdrop'ы и так размываются (blur(2px)) и затемняются — w300
-    // даёт визуально неотличимую картинку при 3-4x меньшем весе.
-    var TMDB = 'https://image.tmdb.org/t/p/w300';
+    var TMDB = 'https://image.tmdb.org/t/p/w780';
     var BG_WWE_RAW       = TMDB + '/dzexW1LJMC5w4oqG2XxUTcGMhL5.jpg';
     var BG_WWE_SMACKDOWN = TMDB + '/2bEaTevFYWY1lLIgsGEIjJddiDw.jpg';
     var BG_AEW_DYNAMITE  = TMDB + '/qQUMMyY4IbSW4a8c1GvmcBdRDDY.jpg';
     var BG_AEW_COLLISION = TMDB + '/dQ8CwU7ADTXJ1Qzf7WiTWgtrvkd.jpg';
     var BG_TNA_IMPACT    = TMDB + '/10dazLg0WJnlirHbgZF7m57iJCu.jpg';
     var BG_PPV           = TMDB + '/uGbpWb3R73LJj7LlQJ7B8cljYJL.jpg';
-    var BG_UFC           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/aa/UFC_74_Respect_Bout.jpg/640px-UFC_74_Respect_Bout.jpg';
-    var BG_BKFC          = 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/BKFC_UK_Ring.jpg/640px-BKFC_UK_Ring.jpg';
+    var BG_UFC           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/aa/UFC_74_Respect_Bout.jpg/1280px-UFC_74_Respect_Bout.jpg';
+    var BG_BKFC          = 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/BKFC_UK_Ring.jpg/1280px-BKFC_UK_Ring.jpg';
 
     var WEEKLY = [
         { id: 'wwe_raw',        title: 'WWE Monday Night Raw',           short: 'WWE Raw',        queries: ['WWE Raw', 'WWE Monday Night Raw'],        airDay: 1, kind: 'weekly', promotion: 'WWE', color: '#E51A22', image: IMG_WWE_RAW,       backdrop: BG_WWE_RAW },
@@ -58,22 +53,6 @@
         'bound for glory', 'hard to kill', 'rebellion', 'slammiversary',
         'genesis', 'victory road', 'no surrender', 'against all odds',
         'tna ppv'
-    ];
-
-    // Прямые поисковые запросы для PPV-агрегатора: широкие (WWE, AEW)
-    // покрывают популярное, специфические (Backlash, Royal Rumble) ловят
-    // конкретные PPV которые могут не попасть в топ-100 широкого запроса.
-    // Jackett ограничивает результаты per-query (~100), поэтому «WWE Backlash»
-    // найдёт Backlash даже если в «WWE» он не в первой сотне.
-    var PPV_AGGREGATE_QUERIES = [
-        'WWE', 'AEW', 'TNA Wrestling',
-        // Прямые запросы по названию крупных PPV:
-        'Backlash', 'WrestleMania', 'Royal Rumble', 'SummerSlam',
-        'Survivor Series', 'Money in the Bank', 'Elimination Chamber',
-        'Crown Jewel', 'Bad Blood', 'Night of Champions',
-        'Double or Nothing', 'All In', 'Full Gear', 'Revolution',
-        'Forbidden Door', 'Dynasty',
-        'Bound for Glory', 'Hard to Kill', 'Slammiversary'
     ];
 
     var PPV_EXCLUDE = ['raw', 'smackdown', 'dynamite', 'collision', 'impact', 'nxt', 'main event'];
@@ -109,7 +88,7 @@
 
     var PPV_AGGREGATE = makeAggregator({
         id: 'ppv_all', title: 'PPV / PLE ивенты', short: 'PPV / PLE', promotion: 'PPV',
-        queries: PPV_AGGREGATE_QUERIES,
+        queries: ['WWE', 'AEW', 'TNA Wrestling'],
         keywords: PPV_KEYWORDS, exclude: PPV_EXCLUDE,
         freshDays: 90, color: '#7C3AED', image: IMG_PPV, backdrop: BG_PPV
     });
@@ -149,15 +128,8 @@
 
     var FEED_DAYS = 14;
     var FEED_LIMIT = 60;
-    // 24 уникальных запроса × concurrency 3 = минимум 8 раундов, каждый
-    // с timeout 20s = в худшем случае 160 секунд. Поднимаем concurrency
-    // и снижаем timeout — слишком медленные JacRed-серверы должны падать
-    // быстрее, а не блокировать UI.
-    var FEED_SEARCH_CONCURRENCY = 5;
-    // PPV-агрегатор теперь делает 20+ запросов — concurrency 4 даёт разумный
-    // компромисс между скоростью и нагрузкой на Jackett/роутер.
-    var EVENT_QUERY_CONCURRENCY = 4;
-    var JACRED_REQUEST_TIMEOUT_MS = 10000;
+    var FEED_SEARCH_CONCURRENCY = 3;
+    var EVENT_QUERY_CONCURRENCY = 2;
     var WRESTLING_FEED_KEYWORDS = [
         'wwe', 'aew', 'tna', 'impact wrestling', 'njpw', 'roh', 'ring of honor',
         'all elite wrestling', 'world wrestling entertainment',
@@ -172,12 +144,7 @@
         'WWE NXT', 'WWE Main Event', 'WWE PPV', 'AEW PPV', 'TNA PPV',
         'NJPW', 'Ring of Honor',
         'UFC', 'UFC Fight Night', 'UFC on ESPN', 'UFC on ABC',
-        'BKFC', 'Bare Knuckle Fighting Championship',
-        // Прямые запросы по крупным PPV — чтобы Jackett нашёл их даже если
-        // они не попали в топ-100 широкого запроса 'WWE PPV'.
-        'Backlash', 'WrestleMania', 'Royal Rumble', 'SummerSlam',
-        'Survivor Series', 'Money in the Bank', 'Elimination Chamber',
-        'Double or Nothing', 'All In', 'Full Gear', 'Forbidden Door'
+        'BKFC', 'Bare Knuckle Fighting Championship'
     ];
 
     function defaultFilterState(eventKind) {
@@ -447,48 +414,6 @@
     var cleanupCount = 0;
     var lastCleanupReason = '';
 
-    // Персистентный кэш «свежих раздач» в Lampa.Storage — при следующем
-    // открытии плагина показываем последний результат МГНОВЕННО, а
-    // фоновое обновление подменяет результат когда придёт. Без этого
-    // юзер каждый раз смотрит «Загружаю свежие раздачи...» 5-15 секунд
-    // пока 24 JacRed-запроса не отработают.
-    var FEED_PERSIST_KEY = 'wrestling_feed_cache_v1';
-    var FEED_PERSIST_TTL = 15 * 60 * 1000;
-    var FEED_PERSIST_TTL_STALE = 6 * 60 * 60 * 1000;
-
-    function loadFeedFromStorage() {
-        try {
-            var raw = Lampa.Storage.get(FEED_PERSIST_KEY, null);
-            if (!raw || typeof raw !== 'object') return null;
-            if (!Array.isArray(raw.matches)) return null;
-            var age = Date.now() - (raw.ts || 0);
-            if (age > FEED_PERSIST_TTL_STALE) return null;
-            return {
-                matches: raw.matches,
-                ts: raw.ts || 0,
-                fresh: age < FEED_PERSIST_TTL,
-                version: raw.version || ''
-            };
-        } catch (e) {
-            return null;
-        }
-    }
-
-    function saveFeedToStorage(matches) {
-        try {
-            var payload = {
-                ts: Date.now(),
-                version: PLUGIN_VERSION,
-                matches: (matches || []).slice(0, FEED_LIMIT)
-            };
-            Lampa.Storage.set(FEED_PERSIST_KEY, payload);
-        } catch (e) {}
-    }
-
-    function clearFeedStorage() {
-        try { Lampa.Storage.set(FEED_PERSIST_KEY, null); } catch (e) {}
-    }
-
     function removeActiveRequest(network) {
         for (var i = activeRequests.length - 1; i >= 0; i--) {
             if (activeRequests[i] === network) activeRequests.splice(i, 1);
@@ -560,7 +485,7 @@
 
         var network = new Lampa.Reguest();
         activeRequests.push(network);
-        network.timeout(JACRED_REQUEST_TIMEOUT_MS);
+        network.timeout(20000);
         network.silent(url, function (data) {
             removeActiveRequest(network);
             if (!Array.isArray(data)) return errorCallback('JacRed(' + config.host + '): ответ не массив');
@@ -642,42 +567,11 @@
         FEED_TITLE_MATCH_RE = parts.length ? new RegExp(parts.join('|')) : null;
     }
 
-    function filterFeedMatches(allResults) {
-        var titleRe = FEED_TITLE_MATCH_RE;
-        var nowMs = Date.now();
-        var cutoff = nowMs - FEED_DAYS * 24 * 60 * 60 * 1000;
-        var futureLimit = nowMs + 24 * 60 * 60 * 1000;
-
-        var matches = [];
-        for (var i = 0; i < allResults.length; i++) {
-            var row = allResults[i];
-            var tNorm = titleNorm(row);
-            if (!(titleRe && titleRe.test(tNorm))) continue;
-
-            var d = ensureEffectiveDate(row);
-            if (!d) continue;
-            var ms = d.getTime();
-            if (ms > futureLimit || ms < cutoff) continue;
-
-            matches.push(row);
-        }
-
-        matches.sort(function (a, b) {
-            return b._effectiveDate.getTime() - a._effectiveDate.getTime();
-        });
-
-        return matches.slice(0, FEED_LIMIT);
-    }
-
     function loadRecentFeed(callback, opts) {
         opts = opts || {};
         var isCancelled = typeof opts.isCancelled === 'function' ? opts.isCancelled : function () { return false; };
         var concurrency = typeof opts.concurrency === 'number' && opts.concurrency > 0
             ? opts.concurrency : FEED_SEARCH_CONCURRENCY;
-        // onPartial(matches, meta) — вызывается каждый раз когда приходит ответ
-        // от очередного JacRed-запроса. Позволяет UI отрисовывать «свежие
-        // раздачи» инкрементально, не ждать пока отработают все 24 запроса.
-        var onPartial = typeof opts.onPartial === 'function' ? opts.onPartial : null;
 
         ensureFeedKeywordsNorm();
         var queries = buildFeedQueries();
@@ -687,8 +581,6 @@
         var nextIx = 0;
         var inflight = 0;
         var finished = 0;
-        var lastPartialAt = 0;
-        var lastPartialCount = 0;
 
         function mergeResults(results) {
             if (isCancelled()) return;
@@ -702,34 +594,36 @@
             }
         }
 
-        function tryPartial(isFinal) {
-            if (!onPartial || isCancelled()) return;
-            var now = Date.now();
-            // Throttle: одна перерисовка не чаще раза в 350мс, чтобы не
-            // молотить DOM при быстрой пачке cached-ответов. На финал
-            // throttle снимаем.
-            if (!isFinal && now - lastPartialAt < 350) return;
-            var matches = filterFeedMatches(allResults);
-            if (!isFinal && matches.length === lastPartialCount) return;
-            lastPartialAt = now;
-            lastPartialCount = matches.length;
-            onPartial(matches, {
-                finished: finished,
-                total: total,
-                final: !!isFinal
-            });
-        }
-
         function applyFinish() {
             if (isCancelled()) return;
-            var matches = filterFeedMatches(allResults);
-            tryPartial(true);
-            callback(matches);
+            var titleRe = FEED_TITLE_MATCH_RE;
+            var nowMs = Date.now();
+            var cutoff = nowMs - FEED_DAYS * 24 * 60 * 60 * 1000;
+            var futureLimit = nowMs + 24 * 60 * 60 * 1000;
+
+            var matches = [];
+            for (var i = 0; i < allResults.length; i++) {
+                var row = allResults[i];
+                var tNorm = titleNorm(row);
+                if (!(titleRe && titleRe.test(tNorm))) continue;
+
+                var d = ensureEffectiveDate(row);
+                if (!d) continue;
+                var ms = d.getTime();
+                if (ms > futureLimit || ms < cutoff) continue;
+
+                matches.push(row);
+            }
+
+            matches.sort(function (a, b) {
+                return b._effectiveDate.getTime() - a._effectiveDate.getTime();
+            });
+
+            callback(matches.slice(0, FEED_LIMIT));
         }
 
         function onQueryDone() {
             finished++;
-            tryPartial(false);
             if (finished >= total) applyFinish();
             else kick();
         }
@@ -1275,34 +1169,15 @@
             scroll.append(feedContainer);
 
             var feedNonce = 0;
-            var countLabel = sectionHeader.find('.wrestling-weekly__section-count');
-
-            function setCountLabel(text) {
-                countLabel.text(text || '');
-            }
-
-            function renderFeed(results, opts) {
-                opts = opts || {};
+            function renderFeed(results) {
                 feedContainer.empty();
                 if (!results.length) {
-                    if (opts.partial) {
-                        feedContainer.append(feedLoader);
-                        setCountLabel('· ищу…');
-                        return;
-                    }
                     feedContainer.append($('<div class="empty"><div class="empty__title">За ' + FEED_DAYS + ' дней свежих раздач не нашлось</div></div>'));
-                    setCountLabel('· 0');
+                    sectionHeader.find('.wrestling-weekly__section-count').text('· 0');
                     return;
                 }
 
-                var suffix = '';
-                if (opts.partial && opts.progress) {
-                    suffix = ' · ищу ' + opts.progress.finished + '/' + opts.progress.total;
-                } else if (opts.stale) {
-                    suffix = ' · кэш, обновляю…';
-                }
-                setCountLabel('· найдено ' + results.length + suffix);
-
+                sectionHeader.find('.wrestling-weekly__section-count').text('· найдено ' + results.length);
                 var feedEvt = { kind: 'feed', title: 'Свежая раздача' };
                 var frag = document.createDocumentFragment();
                 for (var i = 0; i < results.length; i++) {
@@ -1318,39 +1193,17 @@
                 var nonce = ++feedNonce;
                 if (forceRefresh) {
                     jacRedCache = {};
-                    clearFeedStorage();
                     if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Лента: кэш очищен, обновляю…');
                 }
-
-                // 1) Мгновенно отрисуем последний персистентный результат
-                //    (даже stale) — юзер сразу видит контент, а не лоадер.
-                var cached = forceRefresh ? null : loadFeedFromStorage();
-                if (cached && cached.matches.length) {
-                    renderFeed(cached.matches, { stale: !cached.fresh });
-                    // Если кэш свежий — фоновый refresh не нужен.
-                    if (cached.fresh) return;
-                } else {
-                    feedContainer.empty();
-                    feedContainer.append(feedLoader);
-                    setCountLabel('· обновляю…');
-                }
-
-                // 2) Стримим новые результаты по мере прихода ответов от JacRed.
+                feedContainer.empty();
+                feedContainer.append(feedLoader);
+                sectionHeader.find('.wrestling-weekly__section-count').text('· обновляю…');
                 loadRecentFeed(function (results) {
                     if (nonce !== feedNonce || componentDestroyed) return;
                     renderFeed(results);
-                    saveFeedToStorage(results);
                 }, {
                     isCancelled: function () {
                         return nonce !== feedNonce || componentDestroyed;
-                    },
-                    onPartial: function (results, meta) {
-                        if (nonce !== feedNonce || componentDestroyed) return;
-                        if (!results.length) {
-                            setCountLabel('· ищу ' + meta.finished + '/' + meta.total);
-                            return;
-                        }
-                        renderFeed(results, { partial: true, progress: meta });
                     }
                 });
             }
@@ -1679,26 +1532,10 @@
                 cleanupRuntime('manual');
                 return window.wr.state();
             },
-            clearFeedCache: function () {
-                clearFeedStorage();
-                jacRedCache = {};
-                return 'wr feed cache cleared';
-            },
-            feedCache: function () {
-                var c = loadFeedFromStorage();
-                if (!c) return null;
-                return {
-                    fresh: c.fresh,
-                    age_sec: Math.round((Date.now() - c.ts) / 1000),
-                    count: c.matches.length,
-                    version: c.version
-                };
-            },
             state: function () {
                 return {
                     version: PLUGIN_VERSION,
                     cache_keys: Object.keys(jacRedCache).length,
-                    feed_cache: window.wr.feedCache(),
                     active_requests: activeRequests.length,
                     active_player_log: !!activePlayerLog,
                     cleanups: cleanupCount,
