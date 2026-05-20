@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '151';
+    var PLUGIN_VERSION = '152';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -2056,6 +2056,76 @@
   // плеером — поэтому если изначально передать [current] + stub, плеер на
   // конце эпизода видит stub без url и закрывается. Поэтому собираем полный
   // плейлист до Lampa.Player.play.
+  // Закрыть «залипший» оверлей выбора внешнего плеера, который Lampa Android
+  // (SlimBox + ViMu) иногда оставляет поверх запущенного плеера. Пробуем
+  // известные Lampa-API в защищённой обёртке + несколько ретраев,
+  // т.к. оверлей может появиться с задержкой после Player.play.
+  function dismissPlayerPickerOverlay(reason) {
+    var delays = [150, 600, 1400, 2800];
+    for (var i = 0; i < delays.length; i++) {
+      (function (delay) {
+        setTimeout(function () {
+          safe('dismissOverlay', function () {
+            // 1) Закрыть открытый Lampa.Select (списочный модал). У него
+            //    есть .close() в современных сборках; на старых — .hide().
+            if (Lampa.Select) {
+              if (typeof Lampa.Select.close === 'function') Lampa.Select.close();
+              else if (typeof Lampa.Select.hide === 'function') Lampa.Select.hide();
+            }
+            // 2) Закрыть Lampa.Modal если открыт (на некоторых форках
+            //    player chooser идёт через Modal).
+            if (Lampa.Modal && typeof Lampa.Modal.close === 'function') {
+              Lampa.Modal.close();
+            }
+            // 3) Снять Lampa.Loading если она зависла.
+            if (Lampa.Loading && typeof Lampa.Loading.stop === 'function') {
+              Lampa.Loading.stop();
+            }
+          });
+          // 4) DOM-fallback: ищем оверлей строго по содержимому.
+          //    SlimBox player-picker содержит имя внешнего плеера
+          //    (ViMu / MX Player / DDPlayer / Just Player / 4K Player).
+          //    Если такой контейнер видим И в плеере уже активен
+          //    player/video контроллер — оверлей точно «лишний».
+          safe('dismissOverlay.dom', function () {
+            var ctrl = Lampa.Controller && Lampa.Controller.enabled && Lampa.Controller.enabled();
+            var ctrlName = ctrl && ctrl.name;
+            if (ctrlName !== 'player' && ctrlName !== 'video') return;
+            var candidates = document.querySelectorAll(
+              '.select-box, .selectbox, .select, .modal'
+            );
+            var killed = 0;
+            for (var k = 0; k < candidates.length; k++) {
+              var n = candidates[k];
+              if (!n || !n.parentNode) continue;
+              // Игнорируем наши собственные модалки.
+              if (n.classList && (n.classList.contains('cw-cnf') || n.classList.contains('cw-buf'))) continue;
+              if (n.closest && (n.closest('.cw-cnf') || n.closest('.cw-buf'))) continue;
+              var txt = (n.innerText || n.textContent || '').toLowerCase();
+              if (!txt) continue;
+              if (
+                txt.indexOf('vimu') === -1 &&
+                txt.indexOf('mx player') === -1 &&
+                txt.indexOf('ddplayer') === -1 &&
+                txt.indexOf('just player') === -1 &&
+                txt.indexOf('4k player') === -1 &&
+                txt.indexOf('media player') === -1
+              ) continue;
+              n.parentNode.removeChild(n);
+              killed++;
+            }
+            if (killed) {
+              log(
+                'dismissed leftover player-picker overlay (' + (reason || '?') +
+                ' delay=' + delay + ' ctrl=' + ctrlName + ' killed=' + killed + ')'
+              );
+            }
+          });
+        }, delay);
+      })(delays[i]);
+    }
+  }
+
   function startPlayback(movie, params, url, timeline, opts) {
     opts = opts || {};
     var player_type = Lampa.Storage.field('player_torrent');
@@ -2126,7 +2196,6 @@
 
     var doPlay = function (playlist) {
       data.playlist = playlist && playlist.length ? playlist : fallbackPlaylist;
-      if (resumeTime > 0) noty('Восстанавливаем: ' + formatTime(resumeTime));
       var epHash = generateHash(movie, params.season, params.episode);
       if (epHash) {
         S.session_play_hash = epHash;
@@ -2139,6 +2208,12 @@
           Lampa.Controller.toggle('content');
         });
       } catch (e) {}
+      // На SlimBox/Lampa Android оверлей выбора плеера (Lampa.Select со
+      // списком ViMu/MX/etc.) иногда не самодимиссится после автопика —
+      // висит поверх запущенного плеера. Пробуем закрыть его явно с
+      // несколькими попытками — на случай если оверлей появляется с
+      // задержкой после нашего Lampa.Player.play.
+      dismissPlayerPickerOverlay('Player.play');
       log('player started, playlist=' + data.playlist.length + ' items');
     };
 
@@ -2187,7 +2262,7 @@
             safe('Player.playlist.late', function () {
               Lampa.Player.playlist(playlist);
             });
-            noty('Плейлист загружен (' + playlist.length + ' эп.)');
+            log('playlist late-loaded: ' + playlist.length + ' ep.');
           }
           return;
         }
@@ -4485,6 +4560,10 @@
         return arr;
       },
       toast: function (msg, kind) { cwToast(msg, kind || 'info'); },
+      dismissPlayerPicker: function (reason) {
+        dismissPlayerPickerOverlay(reason || 'manual');
+        return 'scheduled';
+      },
       dump: function () {
         var p = readParams();
         console.log('[CW] key:', S.active_key, 'count:', Object.keys(p).length);
