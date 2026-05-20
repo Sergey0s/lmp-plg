@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.1.9';
+    var PLUGIN_VERSION = '2.2.0';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -60,6 +60,22 @@
         'tna ppv'
     ];
 
+    // Прямые поисковые запросы для PPV-агрегатора: широкие (WWE, AEW)
+    // покрывают популярное, специфические (Backlash, Royal Rumble) ловят
+    // конкретные PPV которые могут не попасть в топ-100 широкого запроса.
+    // Jackett ограничивает результаты per-query (~100), поэтому «WWE Backlash»
+    // найдёт Backlash даже если в «WWE» он не в первой сотне.
+    var PPV_AGGREGATE_QUERIES = [
+        'WWE', 'AEW', 'TNA Wrestling',
+        // Прямые запросы по названию крупных PPV:
+        'Backlash', 'WrestleMania', 'Royal Rumble', 'SummerSlam',
+        'Survivor Series', 'Money in the Bank', 'Elimination Chamber',
+        'Crown Jewel', 'Bad Blood', 'Night of Champions',
+        'Double or Nothing', 'All In', 'Full Gear', 'Revolution',
+        'Forbidden Door', 'Dynasty',
+        'Bound for Glory', 'Hard to Kill', 'Slammiversary'
+    ];
+
     var PPV_EXCLUDE = ['raw', 'smackdown', 'dynamite', 'collision', 'impact', 'nxt', 'main event'];
 
     var SEARCH_TILE = {
@@ -93,7 +109,7 @@
 
     var PPV_AGGREGATE = makeAggregator({
         id: 'ppv_all', title: 'PPV / PLE ивенты', short: 'PPV / PLE', promotion: 'PPV',
-        queries: ['WWE', 'AEW', 'TNA Wrestling'],
+        queries: PPV_AGGREGATE_QUERIES,
         keywords: PPV_KEYWORDS, exclude: PPV_EXCLUDE,
         freshDays: 90, color: '#7C3AED', image: IMG_PPV, backdrop: BG_PPV
     });
@@ -138,7 +154,9 @@
     // и снижаем timeout — слишком медленные JacRed-серверы должны падать
     // быстрее, а не блокировать UI.
     var FEED_SEARCH_CONCURRENCY = 5;
-    var EVENT_QUERY_CONCURRENCY = 2;
+    // PPV-агрегатор теперь делает 20+ запросов — concurrency 4 даёт разумный
+    // компромисс между скоростью и нагрузкой на Jackett/роутер.
+    var EVENT_QUERY_CONCURRENCY = 4;
     var JACRED_REQUEST_TIMEOUT_MS = 10000;
     var WRESTLING_FEED_KEYWORDS = [
         'wwe', 'aew', 'tna', 'impact wrestling', 'njpw', 'roh', 'ring of honor',
@@ -154,7 +172,12 @@
         'WWE NXT', 'WWE Main Event', 'WWE PPV', 'AEW PPV', 'TNA PPV',
         'NJPW', 'Ring of Honor',
         'UFC', 'UFC Fight Night', 'UFC on ESPN', 'UFC on ABC',
-        'BKFC', 'Bare Knuckle Fighting Championship'
+        'BKFC', 'Bare Knuckle Fighting Championship',
+        // Прямые запросы по крупным PPV — чтобы Jackett нашёл их даже если
+        // они не попали в топ-100 широкого запроса 'WWE PPV'.
+        'Backlash', 'WrestleMania', 'Royal Rumble', 'SummerSlam',
+        'Survivor Series', 'Money in the Bank', 'Elimination Chamber',
+        'Double or Nothing', 'All In', 'Full Gear', 'Forbidden Door'
     ];
 
     function defaultFilterState(eventKind) {
