@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '152';
+    var PLUGIN_VERSION = '150';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -90,8 +90,6 @@
     last_full_title: null,
     last_full_movie: null,
     last_full_render: null,
-    last_button_signature: null,
-    last_button_signature_at: 0,
     last_play_url: null,
     last_lookup: null,
     last_tick: 0,
@@ -1513,8 +1511,8 @@
 
       if (!activeMovie || !render) return;
       if (pickTitle(activeMovie) !== expectedTitle) return;
-      // НЕ удаляем кнопку руками — _runInject сам сравнит сигнатуру
-      // и пропустит no-op рендер (см. бага «карточка отрисовывается 2-3 раза»).
+      var oldBtn = render.find('.button--continue-watch').first();
+      if (oldBtn.length) oldBtn.remove();
       _runInject(activeMovie, render, {skipPrefetch: true});
     });
   }
@@ -2056,76 +2054,6 @@
   // плеером — поэтому если изначально передать [current] + stub, плеер на
   // конце эпизода видит stub без url и закрывается. Поэтому собираем полный
   // плейлист до Lampa.Player.play.
-  // Закрыть «залипший» оверлей выбора внешнего плеера, который Lampa Android
-  // (SlimBox + ViMu) иногда оставляет поверх запущенного плеера. Пробуем
-  // известные Lampa-API в защищённой обёртке + несколько ретраев,
-  // т.к. оверлей может появиться с задержкой после Player.play.
-  function dismissPlayerPickerOverlay(reason) {
-    var delays = [150, 600, 1400, 2800];
-    for (var i = 0; i < delays.length; i++) {
-      (function (delay) {
-        setTimeout(function () {
-          safe('dismissOverlay', function () {
-            // 1) Закрыть открытый Lampa.Select (списочный модал). У него
-            //    есть .close() в современных сборках; на старых — .hide().
-            if (Lampa.Select) {
-              if (typeof Lampa.Select.close === 'function') Lampa.Select.close();
-              else if (typeof Lampa.Select.hide === 'function') Lampa.Select.hide();
-            }
-            // 2) Закрыть Lampa.Modal если открыт (на некоторых форках
-            //    player chooser идёт через Modal).
-            if (Lampa.Modal && typeof Lampa.Modal.close === 'function') {
-              Lampa.Modal.close();
-            }
-            // 3) Снять Lampa.Loading если она зависла.
-            if (Lampa.Loading && typeof Lampa.Loading.stop === 'function') {
-              Lampa.Loading.stop();
-            }
-          });
-          // 4) DOM-fallback: ищем оверлей строго по содержимому.
-          //    SlimBox player-picker содержит имя внешнего плеера
-          //    (ViMu / MX Player / DDPlayer / Just Player / 4K Player).
-          //    Если такой контейнер видим И в плеере уже активен
-          //    player/video контроллер — оверлей точно «лишний».
-          safe('dismissOverlay.dom', function () {
-            var ctrl = Lampa.Controller && Lampa.Controller.enabled && Lampa.Controller.enabled();
-            var ctrlName = ctrl && ctrl.name;
-            if (ctrlName !== 'player' && ctrlName !== 'video') return;
-            var candidates = document.querySelectorAll(
-              '.select-box, .selectbox, .select, .modal'
-            );
-            var killed = 0;
-            for (var k = 0; k < candidates.length; k++) {
-              var n = candidates[k];
-              if (!n || !n.parentNode) continue;
-              // Игнорируем наши собственные модалки.
-              if (n.classList && (n.classList.contains('cw-cnf') || n.classList.contains('cw-buf'))) continue;
-              if (n.closest && (n.closest('.cw-cnf') || n.closest('.cw-buf'))) continue;
-              var txt = (n.innerText || n.textContent || '').toLowerCase();
-              if (!txt) continue;
-              if (
-                txt.indexOf('vimu') === -1 &&
-                txt.indexOf('mx player') === -1 &&
-                txt.indexOf('ddplayer') === -1 &&
-                txt.indexOf('just player') === -1 &&
-                txt.indexOf('4k player') === -1 &&
-                txt.indexOf('media player') === -1
-              ) continue;
-              n.parentNode.removeChild(n);
-              killed++;
-            }
-            if (killed) {
-              log(
-                'dismissed leftover player-picker overlay (' + (reason || '?') +
-                ' delay=' + delay + ' ctrl=' + ctrlName + ' killed=' + killed + ')'
-              );
-            }
-          });
-        }, delay);
-      })(delays[i]);
-    }
-  }
-
   function startPlayback(movie, params, url, timeline, opts) {
     opts = opts || {};
     var player_type = Lampa.Storage.field('player_torrent');
@@ -2196,6 +2124,7 @@
 
     var doPlay = function (playlist) {
       data.playlist = playlist && playlist.length ? playlist : fallbackPlaylist;
+      if (resumeTime > 0) noty('Восстанавливаем: ' + formatTime(resumeTime));
       var epHash = generateHash(movie, params.season, params.episode);
       if (epHash) {
         S.session_play_hash = epHash;
@@ -2208,12 +2137,6 @@
           Lampa.Controller.toggle('content');
         });
       } catch (e) {}
-      // На SlimBox/Lampa Android оверлей выбора плеера (Lampa.Select со
-      // списком ViMu/MX/etc.) иногда не самодимиссится после автопика —
-      // висит поверх запущенного плеера. Пробуем закрыть его явно с
-      // несколькими попытками — на случай если оверлей появляется с
-      // задержкой после нашего Lampa.Player.play.
-      dismissPlayerPickerOverlay('Player.play');
       log('player started, playlist=' + data.playlist.length + ' items');
     };
 
@@ -2262,7 +2185,7 @@
             safe('Player.playlist.late', function () {
               Lampa.Player.playlist(playlist);
             });
-            log('playlist late-loaded: ' + playlist.length + ' ep.');
+            noty('Плейлист загружен (' + playlist.length + ' эп.)');
           }
           return;
         }
@@ -2425,14 +2348,6 @@
         duration: timeline.duration,
       });
     }
-
-    // ВАЖНО (баг «Продолжить показывает середину прошлого эпизода»):
-    // фиксируем выбор юзера в timestamp'е этой записи. Дальше даже если
-    // внешний плеер закроется без событий, findStreamParams вернёт именно
-    // запущенный эпизод — а не sibling-эпизод со случайно более свежим
-    // timestamp'ом (например, stub из loadEpisodesPlaylist или старый
-    // flushHashFromTimeline предыдущей сессии).
-    touchEntryTimestamp(hash);
 
     var go = function () {
       startPlayback(movie, params, url, timeline, opts);
@@ -2739,10 +2654,7 @@
   // может вернуться поверх нашей кнопки. Делаем несколько дешёвых повторов.
   function scheduleCardButtonRefresh(playedCard) {
     var expectedTitle = pickTitle(playedCard);
-    // 3 попыток достаточно: _runInject теперь идемпотентен через сигнатуру,
-    // лишние повторы только нагружают Lampa.Controller.collectionFocus
-    // и заставляют курсор «прыгать» между Продолжить и Смотреть.
-    var delays = [300, 1200, 3000];
+    var delays = [250, 800, 1600, 3200, 5200];
 
     for (var i = 0; i < delays.length; i++) {
       (function (delay) {
@@ -2765,6 +2677,8 @@
               (act.activity && act.activity.render && act.activity.render());
             if (!movie || !render) return;
             if (expectedTitle && pickTitle(movie) !== expectedTitle) return;
+            var oldBtn = render.find('.button--continue-watch').first();
+            if (oldBtn.length) oldBtn.remove();
             _runInject(movie, render, {skipPrefetch: true});
             log(
               'card refresh after player destroy: delay=' +
@@ -3320,24 +3234,10 @@
     }
   }
 
-  // Сигнатура кнопки — состоит из «видимых» свойств: тайтл/сезон/эпизод/%/время.
-  // Если она совпадает с уже отрисованной — не пересоздаём DOM (см. бага «карточка
-  // отрисовывается 2-3 раза, курсор скачет между Продолжить и Смотреть»):
-  // remove+inject триггерит Lampa.Controller.collectionSet/collectionFocus,
-  // который дёргает фокус и расхолаживает пользователя.
-  function buttonSignature(movie, params, percent, timeSec) {
-    return [
-      pickTitle(movie) || '',
-      params.season || 0,
-      params.episode || 0,
-      Math.round((percent || 0) * 10),
-      Math.round(timeSec || 0),
-    ].join('|');
-  }
-
   function _runInject(movie, render, opts) {
     opts = opts || {};
     if (!movie || !render || !render.find) return;
+    if (render.find('.button--continue-watch').length) return;
 
     var target = pickContinueTarget(movie);
     if (!target) {
@@ -3358,41 +3258,18 @@
     }
 
     var percent = 0,
-      timeSec = 0,
       timeStr = '';
     var hash = generateHash(movie, params.season, params.episode);
     var view = safe('Timeline.view', function () {
       return Lampa.Timeline.view(hash);
     });
-    // ВАЖНО (баг «кнопка показывает середину прошлого эпизода»):
-    // Lampa.Timeline.view(hash) — внутренний in-memory кэш, который НЕ
-    // обновляется нашим syncEntryFromFileView'ом и может вернуть стейл
-    // с предыдущей сессии. Используем его только пока эпизод реально играется
-    // (S.last_player_hash === hash), в остальных случаях доверяем нашему
-    // params (он только что был синхронизирован из file_view) и берём ту
-    // позицию, которая БОЛЬШЕ — чтобы не показать юзеру случайно более старую.
-    var liveHash = S.last_player_hash || S.session_play_hash;
-    var isLive = liveHash === hash;
-    var pTime = params.time || 0;
-    var pPct = params.percent || 0;
-    var vTime = (view && view.time) || 0;
-    var vPct = (view && view.percent) || 0;
-
-    if (isLive && vTime > 0) {
-      timeSec = vTime;
-      percent = vPct;
-    } else if (pTime > 0 || pPct > 0) {
-      timeSec = pTime;
-      percent = pPct;
-      if (vTime > pTime) {
-        timeSec = vTime;
-        percent = vPct;
-      }
-    } else if (vTime > 0 || vPct > 0) {
-      timeSec = vTime;
-      percent = vPct;
+    if (view && view.percent > 0) {
+      percent = view.percent;
+      timeStr = formatTime(view.time);
+    } else if (params.time) {
+      percent = params.percent || 0;
+      timeStr = formatTime(params.time);
     }
-    if (timeSec > 0) timeStr = formatTime(timeSec);
 
     var label = 'Продолжить';
     if (params.season && params.episode)
@@ -3400,26 +3277,7 @@
     if (timeStr)
       label += ' <span class="cw-btn__time">(' + timeStr + ')</span>';
 
-    var sig = buttonSignature(movie, params, percent, timeSec);
-    var existing = render.find('.button--continue-watch').first();
-    if (existing.length) {
-      var existingSig =
-        (existing[0] && (existing[0].cwSig || (existing[0].dataset && existing[0].dataset.cwSig))) ||
-        '';
-      if (existingSig === sig) {
-        S.last_button_signature = sig;
-        S.last_button_signature_at = Date.now();
-        log('button refresh skipped: same signature (' + sig + ')');
-        return;
-      }
-      existing.remove();
-    }
-
     var btn = $(buildButtonHtml(((percent * 65.97) / 100).toFixed(2), label));
-    if (btn[0]) {
-      btn[0].cwSig = sig;
-      if (btn[0].setAttribute) btn[0].setAttribute('data-cw-sig', sig);
-    }
     btn.on('hover:enter', function () {
       onClickContinue(movie, this, render, target);
     });
@@ -3434,8 +3292,6 @@
     }
 
     S.button_injected++;
-    S.last_button_signature = sig;
-    S.last_button_signature_at = Date.now();
     log(
       'button INJECTED #' +
         S.button_injected +
@@ -3444,9 +3300,7 @@
         ' hasNext=' +
         !!target.hasNext +
         ' %=' +
-        percent +
-        ' sig=' +
-        sig
+        percent
     );
 
     lockButtonFocus(render, btn);
@@ -3573,64 +3427,11 @@
     return true;
   }
 
-  // Сравнение значимых полей записи (для синка из file_view).
-  // Если file_view не принёс ничего нового — пропускаем updateEntry,
-  // иначе мы тронем timestamp у эпизода, который реально не двигался,
-  // и пересортируем findStreamParams в его пользу.
-  function fileViewHasFreshData(hash, road) {
-    if (!hash || !road) return false;
-    var existing = (readParams() || {})[hash];
-    if (!existing) return true;
-    var pct = typeof road.percent === 'number' ? road.percent : 0;
-    var t = road.time || 0;
-    var dur = road.duration || 0;
-    return (
-      (pct > 0 && pct !== existing.percent) ||
-      (t > 0 && t !== existing.time) ||
-      (dur > 0 && dur !== existing.duration)
-    );
-  }
-
-  // Прочитать все file_view-ключи и применить sync для каждой записи, которую
-  // мы уже знаем в continue_watch_params. Нужно потому что:
-  //  - внешний плеер (ViMu/SlimBox/MX) может закрыться без player.destroy,
-  //    и S.last_player_hash/session_play_hash могут указывать «не туда»;
-  //  - после рестарта Lampa эти переменные == null, и onFileViewChanged
-  //    раньше ничего не синкал — кнопка показывала старую позицию.
-  function syncAllKnownFileViewEntries(preferredKey) {
-    safe('syncAllFileView', function () {
-      var keys = timelineStorageKeys(preferredKey);
-      if (!keys.length) return;
-      var ours = readParams() || {};
-      var seen = {};
-      var synced = 0;
-      for (var i = 0; i < keys.length; i++) {
-        var fv =
-          safe('fv.readAll', function () {
-            return Lampa.Storage.get(keys[i], {});
-          }) || {};
-        for (var hash in fv) {
-          if (seen[hash]) continue;
-          if (!ours[hash]) continue;
-          seen[hash] = 1;
-          if (!fileViewHasFreshData(hash, fv[hash])) continue;
-          if (syncEntryFromFileView(hash, keys[i])) synced++;
-        }
-      }
-      if (synced) log('file_view bulk sync: ' + synced + ' entries updated');
-    });
-  }
-
   function onFileViewChanged(name) {
     var card =
       S.last_player_card || S.session_play_card || S.last_launched_card;
     var h = S.last_player_hash || S.session_play_hash;
     if (h) syncEntryFromFileView(h, name);
-    // На случай когда S.last_player_hash указывает «не туда» (внешний плеер
-    // не вызвал player.destroy) или вовсе null (после рестарта Lampa) —
-    // дотягиваем актуальное состояние file_view'а для всех известных нам
-    // записей, иначе кнопка «Продолжить» покажет позицию из прошлого захода.
-    syncAllKnownFileViewEntries(name);
     if (!card) return;
     S.last_card_refresh_at = 0;
     refreshActiveCardSoon(card, 'file_view changed');
@@ -4560,10 +4361,6 @@
         return arr;
       },
       toast: function (msg, kind) { cwToast(msg, kind || 'info'); },
-      dismissPlayerPicker: function (reason) {
-        dismissPlayerPickerOverlay(reason || 'manual');
-        return 'scheduled';
-      },
       dump: function () {
         var p = readParams();
         console.log('[CW] key:', S.active_key, 'count:', Object.keys(p).length);
