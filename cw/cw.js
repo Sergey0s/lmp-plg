@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '151';
+    var PLUGIN_VERSION = '155';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -41,6 +41,7 @@
   var ECO_MODE_KEY = 'cw_eco_mode';
 
   var SMART_NEXT_PCT = 92;
+  var SMART_NEXT_RESUME_BACKOFF_SEC = 30;
   var SMART_NEXT_CONFIRM_KEY = 'cw_smart_next_confirm';
   var EXIT_SUMMARY_KEY = 'cw_exit_summary';
   var EXIT_SUMMARY_COOLDOWN_MS = 60 * 1000;
@@ -92,6 +93,8 @@
     last_full_render: null,
     last_button_signature: null,
     last_button_signature_at: 0,
+    restore_continue_after_menu: false,
+    restore_continue_until: 0,
     last_play_url: null,
     last_lookup: null,
     last_tick: 0,
@@ -2142,12 +2145,7 @@
       log('player started, playlist=' + data.playlist.length + ' items');
     };
 
-    if (!isSeries || opts.singleEpisode) {
-      // singleEpisode: юзер выбрал «Досмотреть текущий» в smart-next confirm.
-      // Без playlist'а Lampa.Player не сможет авто-перепрыгнуть на следующую
-      // серию когда мы сразу подходим к концу (это и происходило, юзер думал
-      // что серия запустилась заново — на самом деле плеер за 2 сек добегал
-      // до конца и переходил на S+1 из playlist'а).
+    if (!isSeries) {
       doPlay(fallbackPlaylist);
       return;
     }
@@ -2310,13 +2308,15 @@
           return Lampa.Timeline.view(hash);
         }) || null;
       var resumeT = opts.resumeTime;
+      var backoff = opts.singleEpisode ? SMART_NEXT_RESUME_BACKOFF_SEC : 5;
       if (
         existingDuration > 0 &&
         resumeT > 0 &&
-        resumeT > existingDuration - 5
+        resumeT > existingDuration - backoff
       ) {
-        resumeT = Math.max(0, existingDuration - 5);
+        resumeT = Math.max(0, existingDuration - backoff);
       }
+      opts.resumeTime = resumeT;
       timeline = lampaView0 || {hash: hash};
       timeline.time = resumeT;
       timeline.percent =
@@ -3005,6 +3005,8 @@
 
   function onClickContinue(movie, btn, render, target) {
     if (TIMERS.click) return;
+    S.restore_continue_after_menu = false;
+    S.restore_continue_until = 0;
     target = target || pickContinueTarget(movie);
     if (!target) {
       noty('Нет истории');
@@ -3243,6 +3245,73 @@
         }, delay);
       })(delays[i]);
     }
+  }
+
+  function getCachedContinueButton() {
+    var render = S.last_full_render;
+    if (!render || !render.find) return null;
+    var btn = render.find('.button--continue-watch').first();
+    return btn && btn.length ? btn : null;
+  }
+
+  function rememberContinueFocusBeforeMenu() {
+    var btn = getCachedContinueButton();
+    if (!btn || !btn.hasClass('focus')) return;
+    S.restore_continue_after_menu = true;
+    S.restore_continue_until = Date.now() + 1800;
+    log('menu focus restore armed');
+  }
+
+  function restoreContinueFocusAfterMenu(reason) {
+    if (!S.restore_continue_after_menu) return;
+    if (S.restore_continue_until && Date.now() > S.restore_continue_until) {
+      S.restore_continue_after_menu = false;
+      return;
+    }
+    var delays = [0, 60, 120, 220, 360, 560, 850, 1200, 1650];
+    for (var i = 0; i < delays.length; i++) {
+      (function (delay) {
+        setTimeout(function () {
+          if (!S.restore_continue_after_menu || S.modal_open) return;
+          if (S.restore_continue_until && Date.now() > S.restore_continue_until) {
+            S.restore_continue_after_menu = false;
+            return;
+          }
+          var btn = getCachedContinueButton();
+          if (!btn || !btn[0] || !btn[0].isConnected) return;
+          refreshFocusCollection(S.last_full_render, btn[0]);
+          log('menu focus restore tick: ' + (reason || 'return') + ' +' + delay);
+        }, delay);
+      })(delays[i]);
+    }
+    setTimeout(function () {
+      S.restore_continue_after_menu = false;
+    }, 1900);
+  }
+
+  function patchControllerMenuFocusRestore() {
+    if (
+      !Lampa.Controller ||
+      !Lampa.Controller.toggle ||
+      Lampa.Controller.__cw_menu_focus_restore
+    )
+      return;
+    var originalToggle = Lampa.Controller.toggle;
+    Lampa.Controller.toggle = function (name) {
+      var before = null;
+      try {
+        before = Lampa.Controller.enabled && Lampa.Controller.enabled();
+        before = before && before.name;
+      } catch (e) {}
+      if (name === 'menu') rememberContinueFocusBeforeMenu();
+      var result = originalToggle.apply(this, arguments);
+      if (before === 'menu' && name !== 'menu') {
+        restoreContinueFocusAfterMenu(String(name || 'unknown'));
+      }
+      return result;
+    };
+    Lampa.Controller.__cw_menu_focus_restore = true;
+    log('Controller.toggle patched for menu focus restore');
   }
 
   // Сигнатура кнопки — состоит из «видимых» свойств: тайтл/сезон/эпизод/%/время.
@@ -4783,6 +4852,7 @@
     attachStorageListener();
     attachLifecycleCleanup();
     patchPlayer();
+    patchControllerMenuFocusRestore();
     attachFullListener();
     attachTimelineListener();
     attachProfileListener();
