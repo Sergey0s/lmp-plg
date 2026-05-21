@@ -217,6 +217,7 @@ let noties = [];
 let playerPlayCalls = [];
 let xhrRequests = [];
 let activityPushCalls = [];
+let storageSetCalls = [];
 let focusedNode = null;
 let torrentGetResponse = {
   preloaded_bytes: 10,
@@ -233,6 +234,7 @@ const Lampa = {
   Storage: {
     get(key, def) { return Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : def; },
     set(key, value) {
+      storageSetCalls.push({key, value});
       storage[key] = value;
       (listeners['storage:change'] || []).forEach((cb) => cb({name: key, value}));
     },
@@ -756,6 +758,141 @@ if (playerPlayCalls.length !== 1 || playerPlayCalls[0].episode !== 5) {
 }
 console.log('watched episode resolves next from files OK');
 
+const watchedMissingNextTitle = 'Smoke Watched Missing Next';
+const watchedMissingNextLink = 'magnet:?xt=urn:btih:7777777777777777777777777777777777777788';
+addSeriesEntry(watchedMissingNextTitle, 1, 4, {
+  percent: 100,
+  time: 0,
+  duration: 0,
+  file_index: 4,
+  torrent_link: watchedMissingNextLink,
+  file_name: `${watchedMissingNextTitle} S01 E04.mkv`,
+  timestamp: Date.now() + 7600,
+});
+torserverFileStats = [
+  {id: 4, path: `${watchedMissingNextTitle} S01 E04.mkv`},
+];
+delete sandbox.window.cw.state.files[watchedMissingNextLink];
+delete sandbox.window.cw.state.files_pending[watchedMissingNextLink];
+const watchedMissingNextMovie = {title: watchedMissingNextTitle, name: watchedMissingNextTitle, number_of_seasons: 1};
+const watchedMissingNextRender = makeCardRender();
+activeActivity = {
+  component: 'full',
+  movie: watchedMissingNextMovie,
+  activity: {render: () => watchedMissingNextRender},
+};
+playerPlayCalls = [];
+controllerName = 'content';
+const notiesBeforeMissingNext = noties.length;
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: watchedMissingNextMovie},
+  object: activeActivity,
+});
+const watchedMissingNextBtn = watchedMissingNextRender.find('.button--continue-watch').first();
+if (!watchedMissingNextBtn.length) throw new Error('Watched-missing-next button was not injected');
+watchedMissingNextBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 0) {
+  throw new Error('100% episode with missing next must not launch current episode from start');
+}
+const missingNextNoty = noties.slice(notiesBeforeMissingNext).join(' | ');
+if (missingNextNoty.indexOf('Следующий эпизод не найден') === -1) {
+  throw new Error('Missing next episode should notify user, got: ' + missingNextNoty);
+}
+console.log('watched episode missing next no-autoplay OK');
+
+const watchedPendingNextTitle = 'Smoke Watched Pending Next';
+const watchedPendingNextLink = 'magnet:?xt=urn:btih:7777777777777777777777777777777777777799';
+addSeriesEntry(watchedPendingNextTitle, 1, 4, {
+  percent: 100,
+  time: 0,
+  duration: 0,
+  file_index: 4,
+  torrent_link: watchedPendingNextLink,
+  file_name: `${watchedPendingNextTitle} S01 E04.mkv`,
+  timestamp: Date.now() + 7700,
+});
+delete sandbox.window.cw.state.files[watchedPendingNextLink];
+sandbox.window.cw.state.files_pending[watchedPendingNextLink] = true;
+const watchedPendingNextMovie = {title: watchedPendingNextTitle, name: watchedPendingNextTitle, number_of_seasons: 1};
+const watchedPendingNextRender = makeCardRender();
+activeActivity = {
+  component: 'full',
+  movie: watchedPendingNextMovie,
+  activity: {render: () => watchedPendingNextRender},
+};
+playerPlayCalls = [];
+controllerName = 'content';
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: watchedPendingNextMovie},
+  object: activeActivity,
+});
+const watchedPendingNextBtn = watchedPendingNextRender.find('.button--continue-watch').first();
+if (!watchedPendingNextBtn.length) throw new Error('Watched-pending-next button was not injected');
+watchedPendingNextBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 0) {
+  throw new Error('100% episode with pending files must not launch current episode from start');
+}
+delete sandbox.window.cw.state.files_pending[watchedPendingNextLink];
+console.log('watched episode pending files no-autoplay OK');
+
+// ── Torserver.files throws synchronously → files_pending must be cleaned ─────
+// Setup: install throwing mock BEFORE card render so prefetch also throws.
+// This keeps S.files[link] empty → target.hasNext=false → click goes through
+// resolveNextEpisodeFromFiles path where Torserver.files throws again.
+const torserverThrowTitle = 'Smoke Torserver Throw';
+const torserverThrowLink = 'magnet:?xt=urn:btih:7777777777777777777777777777777788888888';
+addSeriesEntry(torserverThrowTitle, 1, 3, {
+  percent: 100,
+  time: 0,
+  duration: 0,
+  file_index: 3,
+  torrent_link: torserverThrowLink,
+  file_name: `${torserverThrowTitle} S01 E03.mkv`,
+  timestamp: Date.now() + 8000,
+});
+delete sandbox.window.cw.state.files[torserverThrowLink];
+delete sandbox.window.cw.state.files_pending[torserverThrowLink];
+const _origTorserverFiles = Lampa.Torserver.files;
+Lampa.Torserver.files = function () { throw new Error('simulated Torserver.files crash'); };
+const torserverThrowMovie = {title: torserverThrowTitle, name: torserverThrowTitle, number_of_seasons: 1};
+const torserverThrowRender = makeCardRender();
+activeActivity = {
+  component: 'full',
+  movie: torserverThrowMovie,
+  activity: {render: () => torserverThrowRender},
+};
+playerPlayCalls = [];
+controllerName = 'content';
+const notiesBeforeThrow = noties.length;
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: torserverThrowMovie},
+  object: activeActivity,
+});
+const torserverThrowBtn = torserverThrowRender.find('.button--continue-watch').first();
+if (!torserverThrowBtn.length) throw new Error('Torserver-throw button was not injected');
+// click: hasNext=false (S.files empty) → resolveNextEpisodeFromFiles → throws → guardedDone(null)
+torserverThrowBtn.trigger('hover:enter');
+Lampa.Torserver.files = _origTorserverFiles;
+if (sandbox.window.cw.state.files_pending[torserverThrowLink]) {
+  throw new Error('files_pending must be cleared after Torserver.files throws');
+}
+const throwNoty = noties.slice(notiesBeforeThrow).join(' | ');
+if (throwNoty.indexOf('Следующий эпизод не найден') === -1) {
+  throw new Error('resolveNextEpisodeFromFiles throw should result in not-found noty, got: ' + throwNoty);
+}
+const throwNotFoundCount = noties
+  .slice(notiesBeforeThrow)
+  .filter((n) => n.indexOf('Следующий эпизод не найден') !== -1).length;
+if (throwNotFoundCount !== 1) {
+  throw new Error('resolveNextEpisodeFromFiles done() must fire once, not-found count=' + throwNotFoundCount);
+}
+// Ensure modal_open was not left dirty so subsequent tests are not affected.
+sandbox.window.cw.state.modal_open = false;
+console.log('Torserver.files exception → files_pending cleaned up, done() called OK');
+
 const bufferTitle = 'Smoke Buffer Movie';
 const bufferHash = addMovieContinueEntry(bufferTitle);
 storage.continue_watch_params[bufferHash].torrent_link =
@@ -1179,6 +1316,51 @@ if (s2e22Index === -1 || s3e1Index === -1 || s3e1Index <= s2e22Index) {
 }
 console.log('season-boundary playlist OK:', seasonBoundaryKeys.join(' -> '));
 
+const cachedSeasonBoundaryTitle = 'Smoke Cached Season Boundary Series';
+const cachedSeasonBoundaryMovie = {title: cachedSeasonBoundaryTitle, name: cachedSeasonBoundaryTitle, number_of_seasons: 5};
+const cachedSeasonBoundaryLink = 'magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd';
+const cachedSeasonBoundaryFiles = [
+  {id: 41, path: `${cachedSeasonBoundaryTitle} S02 E21.mkv`},
+  {id: 42, path: `${cachedSeasonBoundaryTitle} S02 E22.mkv`},
+  {id: 43, path: `${cachedSeasonBoundaryTitle} S03 E01.mkv`},
+  {id: 44, path: `${cachedSeasonBoundaryTitle} S03 E02.mkv`},
+];
+addSeriesEntry(cachedSeasonBoundaryTitle, 2, 22, {
+  percent: 40,
+  time: 900,
+  file_index: 42,
+  torrent_link: cachedSeasonBoundaryLink,
+  file_name: `${cachedSeasonBoundaryTitle} S02 E22.mkv`,
+  timestamp: Date.now() + 9600,
+});
+sandbox.window.cw.state.files[cachedSeasonBoundaryLink] = cachedSeasonBoundaryFiles;
+const cachedSeasonBoundaryRender = makeCardRender();
+playerPlayCalls = [];
+activeActivity = {
+  component: 'full',
+  movie: cachedSeasonBoundaryMovie,
+  activity: {render: () => cachedSeasonBoundaryRender},
+};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: cachedSeasonBoundaryMovie},
+  object: activeActivity,
+});
+const cachedSeasonBoundaryBtn = cachedSeasonBoundaryRender.find('.button--continue-watch').first();
+if (!cachedSeasonBoundaryBtn.length) throw new Error('Cached season-boundary continue button was not injected');
+cachedSeasonBoundaryBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 1) throw new Error('Cached season-boundary click did not start player');
+const cachedSeasonBoundaryKeys = (playerPlayCalls[0].playlist || []).map((item) => `S${item.season}E${item.episode}`);
+if (!cachedSeasonBoundaryKeys.includes('S3E1')) {
+  throw new Error('Cached playlist should include S3E1 after S2E22: ' + cachedSeasonBoundaryKeys.join(', '));
+}
+const cachedS2E22Index = cachedSeasonBoundaryKeys.indexOf('S2E22');
+const cachedS3E1Index = cachedSeasonBoundaryKeys.indexOf('S3E1');
+if (cachedS2E22Index === -1 || cachedS3E1Index === -1 || cachedS3E1Index <= cachedS2E22Index) {
+  throw new Error('Cached playlist should sort by season then episode: ' + cachedSeasonBoundaryKeys.join(', '));
+}
+console.log('cached season-boundary playlist OK:', cachedSeasonBoundaryKeys.join(' -> '));
+
 const duplicateTitle = 'Smoke Duplicate Series';
 addSeriesEntry(duplicateTitle, 2, 4, {
   percent: 93,
@@ -1376,6 +1558,60 @@ if (!bulkSyncedEntry || bulkSyncedEntry.time !== 3168 || bulkSyncedEntry.percent
 console.log('bulk file_view sync OK:', bulkSyncedEntry.percent + '% / ' + bulkSyncedEntry.time + 's');
 
 // =========================================================================
+// REGRESSION: stale file_view after watching another episode must NOT
+// bump the timestamp of the old episode above the new one.
+// Scenario: user watched E6 (40%), then E5 external player sends a late
+// file_view with 79% (was 80%). Without the fix this would update E5's
+// timestamp to "now", making findStreamParams return E5 instead of E6.
+// =========================================================================
+const staleViewTitle = 'Smoke Stale FileView Series';
+const staleViewNow = Date.now() + 17000;
+addSeriesEntry(staleViewTitle, 1, 5, {
+  percent: 100,
+  time: 3000,
+  duration: 3000,
+  timestamp: staleViewNow - 5000,
+});
+addSeriesEntry(staleViewTitle, 1, 6, {
+  percent: 40,
+  time: 1200,
+  duration: 3000,
+  timestamp: staleViewNow,
+});
+const staleViewHash5 = seriesHash(staleViewTitle, 1, 5);
+const staleViewHash6 = seriesHash(staleViewTitle, 1, 6);
+const tsE5Before = storage.continue_watch_params[staleViewHash5].timestamp;
+const tsE6Before = storage.continue_watch_params[staleViewHash6].timestamp;
+// Simulate a stale external-player update for E5 with slightly regressed percent.
+storageSetCalls = [];
+storage.file_view = Object.assign(storage.file_view || {}, {
+  [staleViewHash5]: {hash: staleViewHash5, percent: 99, time: 2950, duration: 3000},
+});
+Lampa.Storage.set('file_view', storage.file_view);
+const tsE5After = storage.continue_watch_params[staleViewHash5].timestamp;
+const tsE6After = storage.continue_watch_params[staleViewHash6].timestamp;
+if (tsE5After !== tsE5Before) {
+  throw new Error('Stale file_view (regression) must NOT bump E5 timestamp: before=' + tsE5Before + ' after=' + tsE5After);
+}
+if (tsE6After !== tsE6Before) {
+  throw new Error('Stale file_view must NOT touch E6 timestamp at all: before=' + tsE6Before + ' after=' + tsE6After);
+}
+const staleViewParamWrites = storageSetCalls.filter((call) => call.key === 'continue_watch_params').length;
+if (staleViewParamWrites < 1) {
+  throw new Error('Stale file_view changed fields must still be persisted without bumping timestamp');
+}
+// findStreamParams must still prefer E6 (newer timestamp).
+const staleViewMovie = {title: staleViewTitle, name: staleViewTitle, number_of_seasons: 1};
+const staleViewRender = makeCardRender();
+activeActivity = {component: 'full', movie: staleViewMovie, activity: {render: () => staleViewRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: staleViewMovie}, object: activeActivity});
+const staleViewResult = sandbox.window.cw.inspect();
+if (!staleViewResult.target || !staleViewResult.target.current || staleViewResult.target.current.episode !== 6) {
+  throw new Error('After stale file_view update E6 must still win findStreamParams, got: ' + JSON.stringify(staleViewResult.target && staleViewResult.target.current));
+}
+console.log('stale file_view timestamp guard OK: E6 still wins after stale E5 update');
+
+// =========================================================================
 // REGRESSION: exit-summary должен брать название из записи по hash, а не из
 // stale card от предыдущего сериала (Хирург -> Оффлайн).
 // =========================================================================
@@ -1518,6 +1754,81 @@ if (!(launchedTs > otherTs)) {
   throw new Error('Launched episode (S1E' + launchedEpisode + ') timestamp must be > sibling after launchPlayer: launched=' + launchedTs + ' other=' + otherTs);
 }
 console.log('launch touch OK: launched S1E' + launchedEpisode + ' wins findStreamParams (ts ' + launchedTs + ' > ' + otherTs + ')');
+
+// =========================================================================
+// REGRESSION: equal timestamp → compareParams fallback (season/episode/percent)
+// =========================================================================
+const eqTsTitle = 'Smoke EqualTs Series';
+const eqTsNow = Date.now() + 90000;
+// Three episodes with the identical timestamp: S1E3 (highest episode) must win.
+addSeriesEntry(eqTsTitle, 1, 1, {percent: 80, time: 2400, duration: 3000, timestamp: eqTsNow});
+addSeriesEntry(eqTsTitle, 1, 3, {percent: 10, time: 300, duration: 3000, timestamp: eqTsNow});
+addSeriesEntry(eqTsTitle, 1, 2, {percent: 50, time: 1500, duration: 3000, timestamp: eqTsNow});
+const eqTsMovie = {title: eqTsTitle, name: eqTsTitle, number_of_seasons: 1};
+const eqTsRender = makeCardRender();
+activeActivity = {component: 'full', movie: eqTsMovie, activity: {render: () => eqTsRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: eqTsMovie}, object: activeActivity});
+const eqTsResult = sandbox.window.cw.inspect();
+if (!eqTsResult.target || !eqTsResult.target.current || eqTsResult.target.current.episode !== 3) {
+  throw new Error('Equal timestamp: highest episode (S1E3) must win, got: ' + JSON.stringify(eqTsResult.target && eqTsResult.target.current));
+}
+
+// Same timestamp, same episode, higher percent must win (two hash collisions for same ep).
+// Since hashes are keyed per season/episode combination, duplicate hashes overwrite
+// each other — so we verify via direct findStreamParams comparison at inject time.
+// Render a fresh card for a different title to confirm button label picks correct episode.
+const eqTsHiTitle = 'Smoke EqualTs Higher Episode';
+const eqTsHiNow = Date.now() + 91000;
+// S1E2 added first then S1E5 — both same timestamp. Button must show E5.
+addSeriesEntry(eqTsHiTitle, 1, 2, {percent: 70, time: 2100, duration: 3000, timestamp: eqTsHiNow});
+addSeriesEntry(eqTsHiTitle, 1, 5, {percent: 20, time: 600, duration: 3000, timestamp: eqTsHiNow});
+const eqTsHiMovie = {title: eqTsHiTitle, name: eqTsHiTitle, number_of_seasons: 1};
+const eqTsHiRender = makeCardRender();
+activeActivity = {component: 'full', movie: eqTsHiMovie, activity: {render: () => eqTsHiRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: eqTsHiMovie}, object: activeActivity});
+const eqTsHiBtn = eqTsHiRender.find('.button--continue-watch').first();
+if (!eqTsHiBtn.length) throw new Error('EqualTs-hi button not injected');
+const eqTsHiResult = sandbox.window.cw.inspect();
+if (!eqTsHiResult.target || !eqTsHiResult.target.current || eqTsHiResult.target.current.episode !== 5) {
+  throw new Error('Equal timestamp: higher episode (S1E5 over S1E2) must win, got: ' + JSON.stringify(eqTsHiResult.target && eqTsHiResult.target.current));
+}
+
+const eqTsPctTitle = 'Smoke EqualTs Higher Percent';
+const eqTsPctNow = Date.now() + 92000;
+storage.continue_watch_params['manual-eq-pct-low'] = {
+  title: eqTsPctTitle,
+  season: 1,
+  episode: 4,
+  percent: 20,
+  time: 600,
+  duration: 3000,
+  file_index: 4,
+  file_name: `${eqTsPctTitle} low.mkv`,
+  torrent_link: 'magnet:?xt=urn:btih:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+  timestamp: eqTsPctNow,
+};
+storage.continue_watch_params['manual-eq-pct-high'] = {
+  title: eqTsPctTitle,
+  season: 1,
+  episode: 4,
+  percent: 90,
+  time: 2700,
+  duration: 3000,
+  file_index: 44,
+  file_name: `${eqTsPctTitle} high.mkv`,
+  torrent_link: 'magnet:?xt=urn:btih:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+  timestamp: eqTsPctNow,
+};
+sandbox.window.cw.state.mem = null;
+const eqTsPctMovie = {title: eqTsPctTitle, name: eqTsPctTitle, number_of_seasons: 1};
+const eqTsPctRender = makeCardRender();
+activeActivity = {component: 'full', movie: eqTsPctMovie, activity: {render: () => eqTsPctRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: eqTsPctMovie}, object: activeActivity});
+const eqTsPctResult = sandbox.window.cw.inspect();
+if (!eqTsPctResult.target || !eqTsPctResult.target.current || eqTsPctResult.target.current.percent !== 90) {
+  throw new Error('Equal timestamp/episode: higher percent must win, got: ' + JSON.stringify(eqTsPctResult.target && eqTsPctResult.target.current));
+}
+console.log('equal timestamp tiebreak OK');
 
 if (noties.some((n) => /error|ошиб/i.test(n))) {
   throw new Error('Lampa.Noty error shown: ' + noties.join(' | '));
