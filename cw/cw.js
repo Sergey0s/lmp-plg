@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '158';
+    var PLUGIN_VERSION = '159';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -117,6 +117,7 @@
     boot_heap_used: 0,
     timeline_updates: 0,
     file_view_changes: 0,
+    last_file_view_update: null,
     ts_requests: 0,
     ts_request_errors: 0,
     active_xhrs: 0,
@@ -455,7 +456,7 @@
     return ix;
   }
 
-  function updateEntry(hash, data) {
+  function updateEntry(hash, data, opts) {
     var params = readParams();
     var isNew = !params[hash];
     if (isNew) params[hash] = {};
@@ -488,8 +489,12 @@
         changed = true;
       }
     }
-    if (changed || !params[hash].timestamp) {
+    var shouldPreserveTimestamp = !!(opts && opts.preserveTimestamp);
+    if (changed && !shouldPreserveTimestamp) {
       params[hash].timestamp = Date.now();
+    }
+    if (!params[hash].timestamp) params[hash].timestamp = Date.now();
+    if (changed || isNew) {
       var critical = data.percent && data.percent > 90;
       writeParams(params, critical);
       if (DEBUG)
@@ -504,7 +509,8 @@
             ' %=' +
             data.percent +
             ' t=' +
-            data.time
+            data.time +
+            (shouldPreserveTimestamp ? ' preserveTs' : '')
         );
     }
   }
@@ -567,6 +573,19 @@
 
   // =========================================================================
   // 7. Поиск / построение URL
+  // Fallback tie-break when timestamps are equal (e.g. same-millisecond bulk
+  // write or fast episode switching). Prefer: later season → later episode
+  // → higher percent. Returns negative if a wins, positive if b wins.
+  function compareParams(a, b) {
+    var tsDiff = (b.timestamp || 0) - (a.timestamp || 0);
+    if (tsDiff !== 0) return tsDiff;
+    var sDiff = (b.season || 0) - (a.season || 0);
+    if (sDiff !== 0) return sDiff;
+    var eDiff = (b.episode || 0) - (a.episode || 0);
+    if (eDiff !== 0) return eDiff;
+    return (b.percent || 0) - (a.percent || 0);
+  }
+
   // =========================================================================
   function findStreamParams(movie) {
     if (!movie) return null;
@@ -577,14 +596,16 @@
     var ix = S.title_index || buildIndex();
 
     if (movie.number_of_seasons) {
-      var best = null,
-        bestTs = 0;
+      var best = null;
+      var bestHash = null;
       var hashes = ix[title] || [];
       for (var i = 0; i < hashes.length; i++) {
         var p = params[hashes[i]];
-        if (p && p.season && p.episode && p.timestamp > bestTs) {
-          bestTs = p.timestamp;
-          best = p;
+        if (p && p.season && p.episode) {
+          if (!best || compareParams(p, best) < 0) {
+            best = p;
+            bestHash = hashes[i];
+          }
         }
       }
       S.last_lookup = {
@@ -593,6 +614,8 @@
         total: Object.keys(params).length,
         matched: hashes.length,
         found: !!best,
+        pick_source: 'timestamp',
+        pick_winner_hash: bestHash || null,
       };
       log(
         'lookup series title="' +
@@ -613,6 +636,8 @@
       hash: hash,
       total: Object.keys(params).length,
       found: !!f,
+      pick_source: 'timestamp',
+      pick_winner_hash: f ? hash : null,
     };
     log('lookup movie title="' + title + '" found=' + !!f);
     return f;
@@ -625,15 +650,10 @@
     var ix = S.title_index || buildIndex();
     var hashes = ix[title] || [];
     var best = null;
-    var bestTs = 0;
     for (var i = 0; i < hashes.length; i++) {
       var ep = params[hashes[i]];
       if (ep && ep.season === season && ep.episode === episode) {
-        var ts = ep.timestamp || 0;
-        if (!best || ts >= bestTs) {
-          best = ep;
-          bestTs = ts;
-        }
+        if (!best || compareParams(ep, best) < 0) best = ep;
       }
     }
     return best;
@@ -744,25 +764,33 @@
           return;
         }
         S.files_pending[link] = true;
-        safe('Torserver.files.resolveNext', function () {
+        var fileDone = false;
+        var guardedDone = function (result) {
+          if (fileDone) return;
+          fileDone = true;
+          delete S.files_pending[link];
+          done(result);
+        };
+        try {
           Lampa.Torserver.files(
             h,
             function (json) {
-              delete S.files_pending[link];
               if (json && json.file_stats && json.file_stats.length) {
                 S.files[link] = json.file_stats;
                 setTimeout(function () {
                   delete S.files[link];
                 }, 600000);
               }
-              done(findNextEpisodeFromFiles(movie, current));
+              guardedDone(findNextEpisodeFromFiles(movie, current));
             },
             function () {
-              delete S.files_pending[link];
-              done(null);
+              guardedDone(null);
             }
           );
-        });
+        } catch (e) {
+          warn('Torserver.files.resolveNext threw:', e);
+          guardedDone(null);
+        }
       },
       function () {
         done(null);
@@ -828,14 +856,20 @@
           S.last_lookup.reason = 'next episode not in history, showing current';
         return {params: current, hasNext: false};
       }
-      if (next.synthetic_next && S.last_lookup)
-        S.last_lookup.reason = 'next episode from torrent files';
+      if (S.last_lookup) {
+        S.last_lookup.reason = next.synthetic_next
+          ? 'next episode from torrent files'
+          : 'next episode from history';
+      }
       return {
         params: current,
         hasNext: true,
         nextParams: next,
         currentPercent: Math.floor(pct),
       };
+    }
+    if (S.last_lookup && !S.last_lookup.reason) {
+      S.last_lookup.reason = 'in progress';
     }
     return {params: current, hasNext: false};
   }
@@ -1621,7 +1655,7 @@
     if (S.files[torrentLink] || S.files_pending[torrentLink]) return;
     if (!Lampa.Torserver || !Lampa.Torserver.files) return;
     S.files_pending[torrentLink] = true;
-    safe('Torserver.files.prefetch', function () {
+    try {
       Lampa.Torserver.files(
         hash,
         function (json) {
@@ -1651,7 +1685,10 @@
           delete S.files_pending[torrentLink];
         }
       );
-    });
+    } catch (e) {
+      warn('Torserver.files.prefetch threw:', e);
+      delete S.files_pending[torrentLink];
+    }
   }
 
   function prefetchTorrent(movie, params) {
@@ -2292,9 +2329,6 @@
           path: file.path,
           is_file: true,
         });
-        if (movie.number_of_seasons && info.season !== currentParams.season)
-          return;
-
         var epHash = generateHash(movie, info.season, info.episode);
         var tl = Lampa.Timeline.view(epHash) || {
           hash: epHash,
@@ -2349,6 +2383,7 @@
 
     if (movie.number_of_seasons)
       playlist.sort(function (a, b) {
+        if (a.season !== b.season) return a.season - b.season;
         return a.episode - b.episode;
       });
     done(playlist);
@@ -3383,7 +3418,7 @@
     for (var i = 0; i < delays.length; i++) {
       (function (delay) {
         setTimeout(function () {
-          if (!S.restore_continue_after_menu || S.modal_open) return;
+          if (!S.restore_continue_after_menu || S.modal_open || TIMERS.click) return;
           if (S.restore_continue_until && Date.now() > S.restore_continue_until) {
             S.restore_continue_after_menu = false;
             return;
@@ -3674,7 +3709,22 @@
       t = existing.time;
       dur = existing.duration || dur;
     }
-    updateEntry(hash, {percent: pct, time: t, duration: dur});
+    // If the incoming position is not more advanced than what we already have,
+    // update the fields (duration may be more accurate) but keep the existing
+    // timestamp so that findStreamParams does not re-sort in favour of a stale
+    // file_view write from an external player that lagged behind.
+    var isProgression =
+      pct > ((existing && existing.percent) || 0) ||
+      t > ((existing && existing.time) || 0);
+    updateEntry(hash, {percent: pct, time: t, duration: dur}, {preserveTimestamp: !isProgression});
+    S.last_file_view_update = {
+      hash: hash,
+      key: preferredKey || TIMELINE_STORE_KEY,
+      pct: pct,
+      time: t,
+      progression: isProgression,
+      at: Date.now(),
+    };
     return true;
   }
 
@@ -4102,6 +4152,27 @@
             ? '<span style="color:#7c7">yes</span>'
             : '<span style="color:#f66">no</span>');
         body.append(row('▸ inspect: current', currentLabel, true));
+
+        var pickReason = S.last_lookup
+          ? (S.last_lookup.pick_source || 'timestamp') +
+            (S.last_lookup.reason ? ' · ' + S.last_lookup.reason : '') +
+            (S.last_lookup.pick_winner_hash
+              ? ' · hash=' + S.last_lookup.pick_winner_hash
+              : '')
+          : '—';
+        var fvUpd = S.last_file_view_update;
+        var fvUpdLabel = fvUpd
+          ? (fvUpd.progression
+              ? '<span style="color:#7c7">+'
+              : '<span style="color:#fc7">stale ') +
+            fvUpd.pct +
+            '% </span>' +
+            ' · hash=' + fvUpd.hash +
+            ' · key=' + (fvUpd.key || '?') +
+            ' · ' + new Date(fvUpd.at).toLocaleTimeString()
+          : '<span style="opacity:.6">—</span>';
+        body.append(row('▸ inspect: pick reason', pickReason, true));
+        body.append(row('▸ inspect: last file_view sync', fvUpdLabel, true));
 
         if (inspectTarget.nextParams) {
           var nxt = inspectTarget.nextParams;
