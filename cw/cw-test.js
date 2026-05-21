@@ -709,6 +709,53 @@ if (playerPlayCalls[0].episode !== 8 || ![-1, 0].includes(playerPlayCalls[0].pos
 }
 console.log('smart-next confirm OK:', smartTitleText);
 
+const watchedNoNextTitle = 'Smoke Watched No Cached Next';
+const watchedNoNextLink = 'magnet:?xt=urn:btih:7777777777777777777777777777777777777777';
+addSeriesEntry(watchedNoNextTitle, 1, 4, {
+  percent: 100,
+  time: 0,
+  duration: 0,
+  file_index: 4,
+  torrent_link: watchedNoNextLink,
+  file_name: `${watchedNoNextTitle} S01 E04.mkv`,
+  timestamp: Date.now() + 7500,
+});
+torserverFileStats = [
+  {id: 4, path: `${watchedNoNextTitle} S01 E04.mkv`},
+  {id: 5, path: `${watchedNoNextTitle} S01 E05.mkv`},
+];
+delete sandbox.window.cw.state.files[watchedNoNextLink];
+delete sandbox.window.cw.state.files_pending[watchedNoNextLink];
+const watchedNoNextMovie = {title: watchedNoNextTitle, name: watchedNoNextTitle, number_of_seasons: 1};
+const watchedNoNextRender = makeCardRender();
+activeActivity = {
+  component: 'full',
+  movie: watchedNoNextMovie,
+  activity: {render: () => watchedNoNextRender},
+};
+playerPlayCalls = [];
+controllerName = 'content';
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: watchedNoNextMovie},
+  object: activeActivity,
+});
+const watchedNoNextBtn = watchedNoNextRender.find('.button--continue-watch').first();
+if (!watchedNoNextBtn.length) throw new Error('Watched-no-next button was not injected');
+watchedNoNextBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 0) {
+  throw new Error('100% episode without cached next must not launch current episode from start');
+}
+if (controllerName !== 'cw_center_confirm') {
+  throw new Error('100% episode should resolve next from files and open smart-next confirm, got: ' + controllerName);
+}
+const watchedNoNextModal = bodyChildren[bodyChildren.length - 1];
+$(watchedNoNextModal).find('.cw-cnf__btn--primary').trigger('hover:enter');
+if (playerPlayCalls.length !== 1 || playerPlayCalls[0].episode !== 5) {
+  throw new Error('Resolved next episode should launch S1E5: ' + JSON.stringify(playerPlayCalls[0]));
+}
+console.log('watched episode resolves next from files OK');
+
 const bufferTitle = 'Smoke Buffer Movie';
 const bufferHash = addMovieContinueEntry(bufferTitle);
 storage.continue_watch_params[bufferHash].torrent_link =
@@ -1327,6 +1374,95 @@ if (!bulkSyncedEntry || bulkSyncedEntry.time !== 3168 || bulkSyncedEntry.percent
   throw new Error('Bulk file_view sync must update params even without S.last_player_hash: ' + JSON.stringify(bulkSyncedEntry));
 }
 console.log('bulk file_view sync OK:', bulkSyncedEntry.percent + '% / ' + bulkSyncedEntry.time + 's');
+
+// =========================================================================
+// REGRESSION: exit-summary должен брать название из записи по hash, а не из
+// stale card от предыдущего сериала (Хирург -> Оффлайн).
+// =========================================================================
+
+const staleSummaryOldMovie = {title: 'Хирург', name: 'Хирург', number_of_seasons: 1};
+const staleSummaryNewTitle = 'Оффлайн';
+const staleSummaryHash = seriesHash(staleSummaryNewTitle, 1, 1);
+addSeriesEntry(staleSummaryNewTitle, 1, 1, {
+  percent: 12,
+  time: 320,
+  duration: 3180,
+  timestamp: Date.now() + 16000,
+});
+const stateForStaleSummary = sandbox.window.cw.state;
+stateForStaleSummary.last_player_hash = staleSummaryHash;
+stateForStaleSummary.last_player_card = staleSummaryOldMovie;
+stateForStaleSummary.session_play_hash = null;
+stateForStaleSummary.session_play_card = null;
+stateForStaleSummary.last_launched_card = staleSummaryOldMovie;
+
+const oldSetTimeout = sandbox.setTimeout;
+const oldWindowSetTimeout = sandbox.window.setTimeout;
+sandbox.setTimeout = sandbox.window.setTimeout = function (fn) {
+  fn();
+  return 0;
+};
+const notiesBeforeSummary = noties.length;
+sendPlayerDestroy();
+sandbox.setTimeout = oldSetTimeout;
+sandbox.window.setTimeout = oldWindowSetTimeout;
+
+const summaryNoty = noties.slice(notiesBeforeSummary).join(' | ');
+if (summaryNoty.indexOf(staleSummaryNewTitle) === -1 || summaryNoty.indexOf('Хирург') !== -1) {
+  throw new Error('Exit summary must use saved entry title, not stale card title: ' + summaryNoty);
+}
+console.log('stale exit-summary title OK:', summaryNoty);
+
+// =========================================================================
+// REGRESSION: обычный запуск через Lampa.Player.play ("Смотреть" / файлы)
+// должен поднимать timestamp выбранного эпизода. Иначе после перезапуска
+// findStreamParams может вернуть предыдущий сохранённый эпизод.
+// =========================================================================
+
+const nativeLaunchTitle = 'Smoke Native Launch Series';
+addSeriesEntry(nativeLaunchTitle, 1, 7, {
+  percent: 60,
+  time: 1200,
+  file_index: 7,
+  timestamp: 1_700_000_010_000,
+});
+addSeriesEntry(nativeLaunchTitle, 1, 8, {
+  percent: 20,
+  time: 500,
+  file_index: 8,
+  timestamp: 1_700_000_000_000,
+});
+const nativeLaunchMovie = {title: nativeLaunchTitle, name: nativeLaunchTitle, number_of_seasons: 1};
+const nativeHash7 = seriesHash(nativeLaunchTitle, 1, 7);
+const nativeHash8 = seriesHash(nativeLaunchTitle, 1, 8);
+timelineStore[nativeHash8] = {hash: nativeHash8, percent: 20, time: 500, duration: 2400};
+playerPlayCalls = [];
+Lampa.Player.play({
+  card: nativeLaunchMovie,
+  season: 1,
+  episode: 8,
+  title: 'S1 E8',
+  timeline: timelineStore[nativeHash8],
+  torrent_hash: storage.continue_watch_params[nativeHash8].torrent_link,
+  url: 'http://192.168.31.244:8090/stream/Native%20S01E08.mkv?link=magnet-native&index=8&play',
+});
+const nativeTs7 = storage.continue_watch_params[nativeHash7].timestamp;
+const nativeTs8 = storage.continue_watch_params[nativeHash8].timestamp;
+if (!(nativeTs8 > nativeTs7)) {
+  throw new Error('Native Lampa.Player.play must touch launched episode timestamp: e8=' + nativeTs8 + ' e7=' + nativeTs7);
+}
+const nativeRender = makeCardRender();
+activeActivity = {component: 'full', movie: nativeLaunchMovie, activity: {render: () => nativeRender}};
+Lampa.Listener.send('full', {
+  type: 'complite',
+  data: {movie: nativeLaunchMovie},
+  object: activeActivity,
+});
+const nativeState = sandbox.window.cw.inspect(nativeLaunchTitle);
+if (!nativeState.target || !nativeState.target.current || nativeState.target.current.episode !== 8) {
+  throw new Error('After native launch latest continue target must be S1E8: ' + JSON.stringify(nativeState.target));
+}
+console.log('native player launch touch OK: S1E8 wins latest target');
 
 // =========================================================================
 // REGRESSION: v151 — launchPlayer должен сразу повышать timestamp выбранного
