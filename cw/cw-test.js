@@ -217,6 +217,7 @@ let noties = [];
 let playerPlayCalls = [];
 let xhrRequests = [];
 let activityPushCalls = [];
+let focusedNode = null;
 let torrentGetResponse = {
   preloaded_bytes: 10,
   preload_size: 100,
@@ -266,7 +267,14 @@ const Lampa = {
     enabled() { return {name: controllerName || 'content'}; },
     clear() {},
     collectionSet() {},
-    collectionFocus() {},
+    collectionFocus(node) {
+      if (focusedNode && focusedNode.classes) delete focusedNode.classes.focus;
+      focusedNode = node || null;
+      if (focusedNode) {
+        focusedNode.classes = focusedNode.classes || {};
+        focusedNode.classes.focus = true;
+      }
+    },
   },
   Noty: {
     show(text) { noties.push(String(text)); },
@@ -685,8 +693,11 @@ if (!/99%/.test(smartTitleText) || /100%/.test(smartTitleText)) {
 }
 $(smartModal).find('.cw-cnf__btn--secondary').trigger('hover:enter');
 if (playerPlayCalls.length !== 1) throw new Error('Smart-next secondary should start current episode');
-if (playerPlayCalls[0].episode !== 7 || playerPlayCalls[0].position !== 2380) {
-  throw new Error('Smart-next secondary should resume S1E7 at 2380s: ' + JSON.stringify(playerPlayCalls[0]));
+if (playerPlayCalls[0].episode !== 7 || playerPlayCalls[0].position !== 2370) {
+  throw new Error('Smart-next secondary should resume S1E7 at safe 2370s: ' + JSON.stringify(playerPlayCalls[0]));
+}
+if (!playerPlayCalls[0].playlist || playerPlayCalls[0].playlist.length < 2) {
+  throw new Error('Smart-next secondary must keep playlist for player auto-next: ' + JSON.stringify(playerPlayCalls[0].playlist));
 }
 playerPlayCalls = [];
 smartBtn.trigger('hover:enter');
@@ -1246,6 +1257,22 @@ if (repeatSignature !== firstSignature) {
   throw new Error('Dedup must keep the same button instance, signatures differ: ' + firstSignature + ' vs ' + repeatSignature);
 }
 console.log('idempotent button render OK: sig=' + firstSignature);
+
+const menuFocusBtn = idempotentRender.find('.button--continue-watch').first();
+Lampa.Controller.collectionFocus(menuFocusBtn[0], idempotentRender);
+Lampa.Controller.toggle('menu');
+menuFocusBtn.removeClass('focus');
+focusedNode = null;
+Lampa.Controller.toggle('content');
+if (!idempotentRender.find('.button--continue-watch').first().hasClass('focus')) {
+  throw new Error('Continue button focus must be restored after returning from menu');
+}
+playerPlayCalls = [];
+idempotentRender.find('.button--continue-watch').first().trigger('hover:enter');
+if (playerPlayCalls.length !== 1) {
+  throw new Error('Continue button must start playback after returning from menu');
+}
+console.log('menu return focus restore OK');
 
 // =========================================================================
 // REGRESSION: v151 — file_view обновляется ВНЕ привязки к S.last_player_hash
