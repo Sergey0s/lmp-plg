@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '155';
+    var PLUGIN_VERSION = '158';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -697,6 +697,77 @@
         fallback = p;
     }
     return fallback;
+  }
+
+  function resolveNextEpisodeFromFiles(movie, current, done) {
+    var direct =
+      findNextEpisodeParams(movie, current) ||
+      findNextEpisodeFromFiles(movie, current);
+    if (direct) {
+      done(direct);
+      return;
+    }
+    if (!current || !current.torrent_link || !Lampa.Torserver || !Lampa.Torserver.files) {
+      done(null);
+      return;
+    }
+
+    var link = current.torrent_link;
+    var waitForPending = function (left) {
+      if (!S.files_pending[link]) {
+        done(findNextEpisodeFromFiles(movie, current));
+        return;
+      }
+      if (left <= 0) {
+        done(null);
+        return;
+      }
+      setTimeout(function () {
+        waitForPending(left - 1);
+      }, 300);
+    };
+    if (S.files_pending[link]) {
+      waitForPending(12);
+      return;
+    }
+
+    getTorrentHash(
+      {
+        link: link,
+        title: pickTitle(movie),
+        poster: movie && movie.poster_path,
+      },
+      function (torrent) {
+        var h = torrent && (torrent.hash || torrent.Hash);
+        if (!h) {
+          done(null);
+          return;
+        }
+        S.files_pending[link] = true;
+        safe('Torserver.files.resolveNext', function () {
+          Lampa.Torserver.files(
+            h,
+            function (json) {
+              delete S.files_pending[link];
+              if (json && json.file_stats && json.file_stats.length) {
+                S.files[link] = json.file_stats;
+                setTimeout(function () {
+                  delete S.files[link];
+                }, 600000);
+              }
+              done(findNextEpisodeFromFiles(movie, current));
+            },
+            function () {
+              delete S.files_pending[link];
+              done(null);
+            }
+          );
+        });
+      },
+      function () {
+        done(null);
+      }
+    );
   }
 
   function findPrevEpisodeParams(movie, current) {
@@ -2415,6 +2486,15 @@
         var hash = generateHash(movie, p.season, p.episode);
         if (!hash) return;
 
+        // Обычный запуск из Lampa ("Смотреть" / список файлов) тоже должен
+        // обновлять текущий session-context. Иначе после предыдущего сериала
+        // exit-summary может взять старую card при новом hash из file_view.
+        S.session_play_hash = hash;
+        S.session_play_card = movie;
+        S.last_launched_card = movie;
+        S.last_launched_at = Date.now();
+        touchEntryTimestamp(hash);
+
         var tl = Lampa.Timeline.view(hash);
         var fresh = !tl || !tl.percent || tl.percent < 5;
         if (!fresh) return;
@@ -2929,7 +3009,8 @@
         : '';
     var posStr = formatTime(time) + (dur ? ' / ' + formatTime(dur) : '');
 
-    var titleLine = ep ? pickTitle(movie) + ' · ' + ep : pickTitle(movie);
+    var savedTitle = params.title || pickTitle(movie);
+    var titleLine = ep ? savedTitle + ' · ' + ep : savedTitle;
     var subLine =
       pct >= 100
         ? 'Эпизод просмотрен полностью'
@@ -3025,6 +3106,36 @@
     // hasNext + confirm выкл = тихий прыжок к следующему (старое поведение)
     if (target.hasNext && target.nextParams) {
       launchPlayer(movie, cloneFresh(target.nextParams), {startFresh: true});
+      return;
+    }
+    var p = target.params;
+    var pct = p && typeof p.percent === 'number' ? p.percent : 0;
+    if (
+      p &&
+      pct >= SMART_NEXT_PCT &&
+      movie &&
+      movie.number_of_seasons &&
+      p.season &&
+      p.episode
+    ) {
+      noty('Эпизод просмотрен. Ищем следующую серию…');
+      resolveNextEpisodeFromFiles(movie, p, function (next) {
+        if (!next) {
+          noty('Следующий эпизод не найден');
+          return;
+        }
+        var resolvedTarget = {
+          params: p,
+          hasNext: true,
+          nextParams: next,
+          currentPercent: Math.floor(pct),
+        };
+        if (smartNextConfirmEnabled()) {
+          showSmartNextConfirm(movie, resolvedTarget);
+        } else {
+          launchPlayer(movie, cloneFresh(next), {startFresh: true});
+        }
+      });
       return;
     }
     launchPlayer(movie, target.params);
