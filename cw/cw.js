@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '159';
+    var PLUGIN_VERSION = '161';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -366,10 +366,74 @@
   function generateHash(movie, season, episode) {
     var title = pickTitle(movie);
     if (movie && movie.number_of_seasons && season && episode) {
-      var sep = season > 10 ? ':' : '';
-      return Lampa.Utils.hash([season, sep, episode, title].join(''));
+      // Must match Lampa's timeline hash format. Do not add separators here:
+      // native Timeline.update/file_view use the historical concatenation.
+      return Lampa.Utils.hash([season, episode, title].join(''));
     }
     return Lampa.Utils.hash(title);
+  }
+
+  function inferEpisodeFromPlayData(movie, data) {
+    if (!movie || !movie.number_of_seasons || !data) return null;
+    if (data.season && data.episode) {
+      return {
+        season: parseInt(data.season, 10),
+        episode: parseInt(data.episode, 10),
+      };
+    }
+
+    var raw = '';
+    var mFile = data.url && data.url.match(/\/stream\/([^?]+)/);
+    if (mFile) {
+      try {
+        raw = decodeURIComponent(mFile[1]);
+      } catch (e) {
+        raw = mFile[1];
+      }
+    }
+    raw = [
+      raw,
+      data.title || '',
+      data.episode_title || '',
+      data.name || '',
+    ].join(' ');
+
+    var parsed = null;
+    if (raw && Lampa.Torserver && Lampa.Torserver.parse) {
+      parsed = safe('inferEpisode.parse', function () {
+        return Lampa.Torserver.parse({
+          movie: movie,
+          files: [{path: raw}],
+          filename: raw.split('/').pop(),
+          path: raw,
+          is_file: true,
+        });
+      });
+    }
+    if (parsed && parsed.season && parsed.episode) {
+      return {
+        season: parseInt(parsed.season, 10),
+        episode: parseInt(parsed.episode, 10),
+      };
+    }
+
+    var m =
+      raw.match(/s(?:eason)?\s*0*(\d+)[\s._-]*e(?:p(?:isode)?)?\s*0*(\d+)/i) ||
+      raw.match(/(?:^|[^\d])0*(\d+)[\s._-]*x[\s._-]*0*(\d+)(?:[^\d]|$)/i);
+    if (m) {
+      return {
+        season: parseInt(m[1], 10),
+        episode: parseInt(m[2], 10),
+      };
+    }
+
+    var epOnly =
+      raw.match(/(?:^|[^\d])0*(\d+)\s*(?:эпизод|серия|episode|ep)(?:[^\d]|$)/i) ||
+      raw.match(/(?:эпизод|серия|episode|ep)\s*0*(\d+)(?:[^\d]|$)/i);
+    if (epOnly && movie.number_of_seasons === 1) {
+      return {season: 1, episode: parseInt(epOnly[1], 10)};
+    }
+    return null;
   }
 
   // =========================================================================
@@ -2518,8 +2582,20 @@
         );
         if (!movie) return;
 
+        var inferred = inferEpisodeFromPlayData(movie, p);
+        if (inferred && inferred.season && inferred.episode) {
+          p.season = inferred.season;
+          p.episode = inferred.episode;
+        }
+
         var hash = generateHash(movie, p.season, p.episode);
         if (!hash) return;
+        if (movie.number_of_seasons && p.season && p.episode) {
+          p.timeline = p.timeline || {};
+          p.timeline.hash = hash;
+          p.timeline.season = p.season;
+          p.timeline.episode = p.episode;
+        }
 
         // Обычный запуск из Lampa ("Смотреть" / список файлов) тоже должен
         // обновлять текущий session-context. Иначе после предыдущего сериала
