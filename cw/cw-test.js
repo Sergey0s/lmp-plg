@@ -1701,6 +1701,78 @@ if (!nativeState.target || !nativeState.target.current || nativeState.target.cur
 console.log('native player launch touch OK: S1E8 wins latest target');
 
 // =========================================================================
+// REGRESSION: season > 10 должен использовать тот же hash, что Lampa Timeline.
+// Последний refactor добавлял ":" в generateHash для S11+, из-за чего
+// Player.play создавал запись с metadata под одним hash, а Timeline.update
+// писал прогресс под другим hash-стабом без season/episode.
+// =========================================================================
+const nativeHighSeasonTitle = 'Smoke Native High Season';
+const nativeHighSeasonMovie = {title: nativeHighSeasonTitle, name: nativeHighSeasonTitle, number_of_seasons: 12};
+const nativeHighSeasonHash = seriesHash(nativeHighSeasonTitle, 11, 2);
+const nativeHighSeasonColonHash = Lampa.Utils.hash([11, ':', 2, nativeHighSeasonTitle].join(''));
+delete storage.continue_watch_params[nativeHighSeasonHash];
+delete storage.continue_watch_params[nativeHighSeasonColonHash];
+playerPlayCalls = [];
+Lampa.Player.play({
+  card: nativeHighSeasonMovie,
+  season: 11,
+  episode: 2,
+  title: 'S11 E2',
+  torrent_hash: 'magnet:?xt=urn:btih:1111111111111111111111111111111111111111',
+  url: 'http://192.168.31.244:8090/stream/Native%20S11E02.mkv?link=magnet-high-season&index=112&play',
+});
+Lampa.Timeline.update({hash: nativeHighSeasonHash, percent: 15, time: 360, duration: 2400});
+const nativeHighSeasonEntry = storage.continue_watch_params[nativeHighSeasonHash];
+if (!nativeHighSeasonEntry || nativeHighSeasonEntry.season !== 11 || nativeHighSeasonEntry.episode !== 2) {
+  throw new Error('S11E2 progress must be saved under Lampa timeline hash with metadata: ' + JSON.stringify(nativeHighSeasonEntry));
+}
+if (nativeHighSeasonEntry.percent !== 15 || nativeHighSeasonEntry.time !== 360) {
+  throw new Error('S11E2 timeline progress was not saved correctly: ' + JSON.stringify(nativeHighSeasonEntry));
+}
+if (storage.continue_watch_params[nativeHighSeasonColonHash]) {
+  throw new Error('S11E2 must not create colon-hash duplicate entry: ' + JSON.stringify(storage.continue_watch_params[nativeHighSeasonColonHash]));
+}
+console.log('native high-season hash compatibility OK');
+
+// =========================================================================
+// REGRESSION: обычный запуск из списка файлов Lampa может прийти без
+// season/episode, но с S01E06 в stream URL. В таком случае нельзя сохранять
+// прогресс как "фильм" по hash(title), иначе кнопка продолжит старую серию.
+// =========================================================================
+const nativeFileListTitle = 'Smoke Native File List Series';
+const nativeFileListMovie = {title: nativeFileListTitle, name: nativeFileListTitle, number_of_seasons: 1};
+const nativeFileListHash = seriesHash(nativeFileListTitle, 1, 6);
+const nativeFileListMovieHash = Lampa.Utils.hash(nativeFileListTitle);
+delete storage.continue_watch_params[nativeFileListHash];
+delete storage.continue_watch_params[nativeFileListMovieHash];
+playerPlayCalls = [];
+Lampa.Player.play({
+  card: nativeFileListMovie,
+  title: '6 эпизод',
+  torrent_hash: 'magnet:?xt=urn:btih:2222222222222222222222222222222222222222',
+  url: 'http://192.168.31.244:8090/stream/If.Wishes.Could.Kill.S01E06.CF.Episode.6.avi?link=magnet-file-list&index=6&play',
+});
+const nativeFileListPlay = playerPlayCalls[playerPlayCalls.length - 1];
+if (nativeFileListPlay.season !== 1 || nativeFileListPlay.episode !== 6) {
+  throw new Error('Native file-list play must infer S1E6 from stream URL: ' + JSON.stringify(nativeFileListPlay));
+}
+if (!nativeFileListPlay.timeline || nativeFileListPlay.timeline.hash !== nativeFileListHash) {
+  throw new Error('Native file-list play must force episode timeline hash: ' + JSON.stringify(nativeFileListPlay.timeline));
+}
+Lampa.Timeline.update({hash: nativeFileListHash, percent: 85, time: 2595, duration: 3028});
+const nativeFileListEntry = storage.continue_watch_params[nativeFileListHash];
+if (!nativeFileListEntry || nativeFileListEntry.season !== 1 || nativeFileListEntry.episode !== 6) {
+  throw new Error('Native file-list progress must be saved as S1E6 entry: ' + JSON.stringify(nativeFileListEntry));
+}
+if (nativeFileListEntry.percent !== 85 || nativeFileListEntry.time !== 2595) {
+  throw new Error('Native file-list S1E6 progress was not saved correctly: ' + JSON.stringify(nativeFileListEntry));
+}
+if (storage.continue_watch_params[nativeFileListMovieHash]) {
+  throw new Error('Native file-list must not create movie entry for a series: ' + JSON.stringify(storage.continue_watch_params[nativeFileListMovieHash]));
+}
+console.log('native file-list episode inference OK');
+
+// =========================================================================
 // REGRESSION: v151 — launchPlayer должен сразу повышать timestamp выбранного
 // эпизода, чтобы findStreamParams возвращал его, а не sibling-эпизод
 // со случайно более свежим timestamp'ом.
