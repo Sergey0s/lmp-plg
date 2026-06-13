@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.3.0';
+    var PLUGIN_VERSION = '2.3.3';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -49,12 +49,20 @@
         'money in the bank', 'elimination chamber', 'backlash', 'crown jewel',
         'bad blood', 'clash at', 'clash in', 'night of champions',
         'saturday night main event', 'saturday night s main event', 'snme',
+        'battleground', 'payback', 'extreme rules', 'hell in a cell', 'tlc',
+        'fastlane', 'no mercy', 'vengeance', 'armageddon', 'judgment day',
+        'cyber sunday', 'no way out', 'king of the ring', 'queen of the ring',
+        'bash in berlin', 'clash in italy', 'clash in paris',
+        'evolution', 'worlds collide',
         'wwe ppv', 'wwe ple',
         'all in', 'double or nothing', 'all out', 'full gear', 'revolution',
         'wrestledream', 'worlds end', 'forbidden door', 'dynasty', 'grand slam',
-        'aew ppv',
+        'beach break', 'blood and guts', 'aew ppv',
         'bound for glory', 'hard to kill', 'rebellion', 'slammiversary',
         'genesis', 'victory road', 'no surrender', 'against all odds',
+        'sacrifice', 'turning point', 'final resolution', 'lockdown',
+        'emergence', 'destination x',
+        'halloween havoc', 'great american bash',
         'tna ppv'
     ];
 
@@ -69,9 +77,14 @@
         'Backlash', 'WrestleMania', 'Royal Rumble', 'SummerSlam',
         'Survivor Series', 'Money in the Bank', 'Elimination Chamber',
         'Crown Jewel', 'Bad Blood', 'Night of Champions',
+        'Battleground', 'Payback', 'Extreme Rules', 'Hell in a Cell',
+        'Fastlane', 'No Mercy', 'King of the Ring', 'Queen of the Ring',
+        'Clash in Italy', 'Clash in Paris', 'WWE Evolution',
+        'Worlds Collide', 'Halloween Havoc', 'Great American Bash',
         'Double or Nothing', 'All In', 'Full Gear', 'Revolution',
-        'Forbidden Door', 'Dynasty',
-        'Bound for Glory', 'Hard to Kill', 'Slammiversary'
+        'Forbidden Door', 'Dynasty', 'All Out', 'Worlds End', 'WrestleDream',
+        'Bound for Glory', 'Hard to Kill', 'Slammiversary',
+        'Sacrifice', 'Turning Point', 'Final Resolution'
     ];
 
     var PPV_EXCLUDE = ['raw', 'smackdown', 'dynamite', 'collision', 'impact', 'nxt', 'main event'];
@@ -140,11 +153,12 @@
             'fifa world cup 2026',
             'world cup 2026'
         ],
-        matchKeywords: ['футбол', 'football', 'soccer', 'матч'],
+        matchKeywords: ['футбол', 'football', 'soccer'],
         excludeKeywords: [
             'обзор', 'highlights',
             'пресс конференция', 'press conference',
-            'жеребьевка', 'draw'
+            'жеребьевка', 'draw',
+            'хоккей', 'hockey', 'nhl', 'кхл'
         ],
         kind: 'football',
         promotion: 'FIFA',
@@ -185,7 +199,9 @@
     var JACRED_REQUEST_TIMEOUT_MS = 10000;
     var WRESTLING_FEED_KEYWORDS = [
         'wwe', 'aew', 'tna', 'impact wrestling', 'njpw', 'roh', 'ring of honor',
+        'wwf', 'wcw', 'ecw', 'aaa x wwe',
         'all elite wrestling', 'world wrestling entertainment',
+        'professional wrestling', 'wrestling',
         'рестлинг', 'реслинг',
         'ufc', 'ultimate fighting championship',
         'bkfc', 'bare knuckle fighting championship', 'bare knuckle'
@@ -195,6 +211,10 @@
 
     var FEED_EXTRA_QUERIES = [
         'WWE NXT', 'WWE Main Event', 'WWE PPV', 'AEW PPV', 'TNA PPV',
+        'WWE Saturday Night Main Event', 'WWE Worlds Collide',
+        'WWE Evolution', 'WWE Halloween Havoc', 'WWE Great American Bash',
+        'AEW Rampage', 'ROH Wrestling', 'TNA Xplosion',
+        'WCW Nitro', 'WWF WWE',
         'NJPW', 'Ring of Honor',
         'UFC', 'UFC Fight Night', 'UFC on ESPN', 'UFC on ABC',
         'BKFC', 'Bare Knuckle Fighting Championship',
