@@ -1902,6 +1902,92 @@ if (!eqTsPctResult.target || !eqTsPctResult.target.current || eqTsPctResult.targ
 }
 console.log('equal timestamp tiebreak OK');
 
+// =========================================================================
+// REGRESSION: online_mod playback must not save progress into the previous
+// torrent entry. online_mod calls Lampa.Player.play without torrent_hash and
+// often without card; cw must pick active full-card, save source=online, and
+// render Continue for that card using the online URL.
+// =========================================================================
+const previousTorrentTitle = 'Smoke Previous Torrent Movie';
+const previousTorrentHash = addMovieContinueEntry(previousTorrentTitle);
+const previousTorrentBefore = Object.assign({}, storage.continue_watch_params[previousTorrentHash]);
+const onlineMovieTitle = 'Smoke Online Movie';
+const onlineMovieHash = Lampa.Utils.hash(onlineMovieTitle);
+const onlineMovie = {title: onlineMovieTitle, name: onlineMovieTitle, original_title: onlineMovieTitle};
+const onlineMovieUrl = 'https://online.example/video/movie-720.m3u8';
+delete storage.continue_watch_params[onlineMovieHash];
+activeActivity = {component: 'full', movie: onlineMovie};
+sandbox.window.cw.state.last_player_hash = previousTorrentHash;
+sandbox.window.cw.state.last_player_card = {title: previousTorrentTitle, name: previousTorrentTitle};
+playerPlayCalls = [];
+Lampa.Player.play({
+  url: onlineMovieUrl,
+  timeline: {hash: onlineMovieHash},
+  title: onlineMovieTitle,
+});
+Lampa.Timeline.update({hash: onlineMovieHash, percent: 42, time: 840, duration: 2000});
+sendPlayerDestroy();
+const previousTorrentAfter = storage.continue_watch_params[previousTorrentHash];
+if (previousTorrentAfter.time !== previousTorrentBefore.time || previousTorrentAfter.percent !== previousTorrentBefore.percent) {
+  throw new Error('Online playback must not overwrite previous torrent entry: before=' + JSON.stringify(previousTorrentBefore) + ' after=' + JSON.stringify(previousTorrentAfter));
+}
+const onlineMovieEntry = storage.continue_watch_params[onlineMovieHash];
+if (!onlineMovieEntry || onlineMovieEntry.source !== 'online' || onlineMovieEntry.online_url !== onlineMovieUrl) {
+  throw new Error('Online movie entry was not saved with source/url: ' + JSON.stringify(onlineMovieEntry));
+}
+if (onlineMovieEntry.torrent_link || onlineMovieEntry.file_name) {
+  throw new Error('Online movie entry must not keep torrent fields: ' + JSON.stringify(onlineMovieEntry));
+}
+const onlineMovieRender = makeCardRender();
+activeActivity = {component: 'full', movie: onlineMovie, activity: {render: () => onlineMovieRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: onlineMovie}, object: activeActivity});
+const onlineMovieBtn = onlineMovieRender.find('.button--continue-watch').first();
+if (!onlineMovieBtn.length) throw new Error('Online movie Continue button was not injected');
+playerPlayCalls = [];
+onlineMovieBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 1 || playerPlayCalls[0].url !== onlineMovieUrl || playerPlayCalls[0].torrent_hash) {
+  throw new Error('Online movie Continue must launch online URL without torrent_hash: ' + JSON.stringify(playerPlayCalls[0]));
+}
+console.log('online movie source isolation OK');
+
+const onlineSeriesTitle = 'Smoke Online Series';
+const onlineSeriesMovie = {
+  title: onlineSeriesTitle,
+  name: onlineSeriesTitle,
+  original_title: onlineSeriesTitle,
+  number_of_seasons: 1,
+};
+const onlineSeriesHash = seriesHash(onlineSeriesTitle, 1, 3);
+const onlineSeriesUrl = 'https://online.example/video/s01e03.m3u8';
+delete storage.continue_watch_params[onlineSeriesHash];
+activeActivity = {component: 'full', movie: onlineSeriesMovie};
+playerPlayCalls = [];
+Lampa.Player.play({
+  url: onlineSeriesUrl,
+  timeline: {hash: onlineSeriesHash},
+  title: 'S1 E3',
+});
+Lampa.Timeline.update({hash: onlineSeriesHash, percent: 33, time: 990, duration: 3000});
+sendPlayerDestroy();
+const onlineSeriesEntry = storage.continue_watch_params[onlineSeriesHash];
+if (!onlineSeriesEntry || onlineSeriesEntry.source !== 'online' || onlineSeriesEntry.season !== 1 || onlineSeriesEntry.episode !== 3) {
+  throw new Error('Online series metadata was not saved: ' + JSON.stringify(onlineSeriesEntry));
+}
+const onlineSeriesRender = makeCardRender();
+activeActivity = {component: 'full', movie: onlineSeriesMovie, activity: {render: () => onlineSeriesRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: onlineSeriesMovie}, object: activeActivity});
+const onlineSeriesBtn = onlineSeriesRender.find('.button--continue-watch').first();
+if (!onlineSeriesBtn.length) throw new Error('Online series Continue button was not injected');
+if ((onlineSeriesBtn.nodes[0].html || '').indexOf('S1 E3') === -1) {
+  throw new Error('Online series Continue label should show S1 E3: ' + (onlineSeriesBtn.nodes[0].html || ''));
+}
+playerPlayCalls = [];
+onlineSeriesBtn.trigger('hover:enter');
+if (playerPlayCalls.length !== 1 || playerPlayCalls[0].url !== onlineSeriesUrl || playerPlayCalls[0].torrent_hash) {
+  throw new Error('Online series Continue must launch online URL without torrent_hash: ' + JSON.stringify(playerPlayCalls[0]));
+}
+console.log('online series Continue OK');
+
 if (noties.some((n) => /error|ошиб/i.test(n))) {
   throw new Error('Lampa.Noty error shown: ' + noties.join(' | '));
 }
