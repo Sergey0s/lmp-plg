@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-    var PLUGIN_VERSION = '161';
+  var PLUGIN_VERSION = '162';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -101,8 +101,10 @@
     last_card_refresh_at: 0,
     last_player_hash: null,
     last_player_card: null,
+    last_player_source: null,
     session_play_hash: null,
     session_play_card: null,
+    session_play_source: null,
     last_launched_card: null,
     last_launched_at: 0,
     last_exit_summary_at: 0,
@@ -373,6 +375,39 @@
     return Lampa.Utils.hash(title);
   }
 
+  function detectPlaybackSource(data) {
+    if (!data) return 'unknown';
+    var url = String(data.url || '');
+    if (data.torrent_hash || data.torrent_link || url.indexOf('/stream/') !== -1)
+      return 'torrent';
+    return url ? 'online' : 'unknown';
+  }
+
+  function hashForPlayback(movie, data, source) {
+    if (source === 'online' && data && data.timeline && data.timeline.hash) {
+      return data.timeline.hash;
+    }
+    return generateHash(movie, data && data.season, data && data.episode);
+  }
+
+  function inferEpisodeFromTimelineHash(movie, hash) {
+    if (!movie || !movie.number_of_seasons || !hash) return null;
+    var title = pickTitle(movie);
+    var maxSeason = Math.max(parseInt(movie.number_of_seasons, 10) || 1, 30);
+    for (var season = 1; season <= maxSeason; season++) {
+      for (var episode = 1; episode <= 250; episode++) {
+        if (String(Lampa.Utils.hash([season, episode, title].join(''))) === String(hash))
+          return {season: season, episode: episode};
+        if (
+          String(Lampa.Utils.hash([season, season > 10 ? ':' : '', episode, title].join(''))) ===
+          String(hash)
+        )
+          return {season: season, episode: episode};
+      }
+    }
+    return null;
+  }
+
   function inferEpisodeFromPlayData(movie, data) {
     if (!movie || !movie.number_of_seasons || !data) return null;
     if (data.season && data.episode) {
@@ -381,6 +416,22 @@
         episode: parseInt(data.episode, 10),
       };
     }
+
+    var byTitle = String(data.title || data.episode_title || '').match(
+      /(?:S|сезон\s*)0*(\d+)\s*(?:E|сер(?:ия|ии|\.|e)?\s*)0*(\d+)/i
+    );
+    if (byTitle) {
+      return {
+        season: parseInt(byTitle[1], 10),
+        episode: parseInt(byTitle[2], 10),
+      };
+    }
+
+    var byTimelineHash = inferEpisodeFromTimelineHash(
+      movie,
+      data.timeline && data.timeline.hash
+    );
+    if (byTimelineHash) return byTimelineHash;
 
     var raw = '';
     var mFile = data.url && data.url.match(/\/stream\/([^?]+)/);
@@ -1040,6 +1091,11 @@
     return (
       url + '/stream/' + encodeURIComponent(p.file_name) + '?' + q.join('&')
     );
+  }
+
+  function buildPlaybackUrl(p) {
+    if (p && p.source === 'online' && p.online_url) return p.online_url;
+    return buildStreamUrl(p);
   }
 
   // =========================================================================
@@ -2235,6 +2291,7 @@
     opts = opts || {};
     var player_type = Lampa.Storage.field('player_torrent');
     var force_inner = player_type === 'inner';
+    var isOnline = params && params.source === 'online';
     var isSeries = !!(
       movie.number_of_seasons &&
       params.season &&
@@ -2259,14 +2316,14 @@
       url: url,
       title: params.episode_title || params.title || movie.title,
       card: movie,
-      torrent_hash: params.torrent_link,
       timeline: timeline,
       season: params.season,
       episode: params.episode,
       position: resumeTime || -1,
     };
+    if (!isOnline) data.torrent_hash = params.torrent_link;
 
-    if (force_inner) {
+    if (!isOnline && force_inner) {
       delete data.torrent_hash;
       var orig = Lampa.Platform.is;
       Lampa.Platform.is = function (w) {
@@ -2294,10 +2351,10 @@
         season: params.season,
         episode: params.episode,
         card: movie,
-        torrent_hash: params.torrent_link,
         position: resumeTime || -1,
       },
     ];
+    if (!isOnline) fallbackPlaylist[0].torrent_hash = params.torrent_link;
 
     var doPlay = function (playlist) {
       data.playlist = playlist && playlist.length ? playlist : fallbackPlaylist;
@@ -2317,7 +2374,7 @@
       log('player started, playlist=' + data.playlist.length + ' items');
     };
 
-    if (!isSeries) {
+    if (!isSeries || isOnline) {
       doPlay(fallbackPlaylist);
       return;
     }
@@ -2455,13 +2512,16 @@
 
   function launchPlayer(movie, params, opts) {
     opts = opts || {};
-    var url = buildStreamUrl(params);
+    var url = buildPlaybackUrl(params);
     if (!url) return;
 
     S.last_launched_card = movie;
     S.last_launched_at = Date.now();
 
-    var hash = generateHash(movie, params.season, params.episode);
+    var hash =
+      params.source === 'online' && params.online_hash
+        ? params.online_hash
+        : generateHash(movie, params.season, params.episode);
     var existingEntry = readParams()[hash] || {};
     var existingDuration = existingEntry.duration || params.duration || 0;
     var timeline;
@@ -2566,8 +2626,8 @@
     Lampa.Player.play = function (p) {
       safe('patchPlayer.intercept', function () {
         S.last_play_url = p && p.url;
-        var hasStream = p && p.url && p.url.indexOf('/stream/') !== -1;
-        if (!(p && (p.torrent_hash || hasStream))) return;
+        if (!(p && p.url)) return;
+        var source = detectPlaybackSource(p);
 
         S.play_intercepted++;
         var movie =
@@ -2581,6 +2641,7 @@
             (p.url ? p.url.slice(0, 120) : '')
         );
         if (!movie) return;
+        if (!p.card) p.card = movie;
 
         var inferred = inferEpisodeFromPlayData(movie, p);
         if (inferred && inferred.season && inferred.episode) {
@@ -2588,7 +2649,7 @@
           p.episode = inferred.episode;
         }
 
-        var hash = generateHash(movie, p.season, p.episode);
+        var hash = hashForPlayback(movie, p, source);
         if (!hash) return;
         if (movie.number_of_seasons && p.season && p.episode) {
           p.timeline = p.timeline || {};
@@ -2602,20 +2663,44 @@
         // exit-summary может взять старую card при новом hash из file_view.
         S.session_play_hash = hash;
         S.session_play_card = movie;
+        S.session_play_source = source;
         S.last_launched_card = movie;
         S.last_launched_at = Date.now();
-        touchEntryTimestamp(hash);
+        attachPlayerListeners();
 
-        var tl = Lampa.Timeline.view(hash);
-        var fresh = !tl || !tl.percent || tl.percent < 5;
-        if (!fresh) return;
+        var patch = {
+          source: source,
+          title: pickTitle(movie),
+          season: p.season,
+          episode: p.episode,
+          episode_title: p.title || p.episode_title,
+        };
 
         var mFile = p.url && p.url.match(/\/stream\/([^?]+)/);
         var mLink = p.url && p.url.match(/[?&]link=([^&]+)/);
         var mIdx = p.url && p.url.match(/[?&]index=(\d+)/);
+        if (source === 'online') {
+          patch.online_hash = hash;
+          patch.online_url = p.url;
+          patch.file_name = null;
+          patch.torrent_link = null;
+          patch.file_index = null;
+        } else if (mFile && mLink) {
+          patch.file_name = decodeURIComponent(mFile[1]);
+          patch.torrent_link = mLink[1];
+          patch.file_index = mIdx ? parseInt(mIdx[1], 10) : 0;
+        }
+        updateEntry(hash, patch);
+        touchEntryTimestamp(hash);
+
+        var tl = Lampa.Timeline.view(hash);
+        var fresh = !tl || !tl.percent || tl.percent < 5;
+        if (!fresh || source === 'online') return;
+
         if (!mFile || !mLink) return;
 
         updateEntry(hash, {
+          source: 'torrent',
           file_name: decodeURIComponent(mFile[1]),
           torrent_link: mLink[1],
           file_index: mIdx ? parseInt(mIdx[1]) : 0,
@@ -2647,7 +2732,10 @@
     var card =
       S.last_player_card || S.session_play_card || S.last_launched_card;
     if (!card) return false;
-    updateEntry(hash, {title: pickTitle(card)});
+    updateEntry(hash, {
+      title: pickTitle(card),
+      source: S.last_player_source || S.session_play_source || 'unknown',
+    });
     log(
       'timeline: created stub entry for hash=' +
         String(hash).slice(0, 12) +
@@ -2769,7 +2857,13 @@
     detachPlayerListeners();
     LISTENERS.player_start = function (d) {
       if (!d || !d.card) return;
-      var hash = generateHash(d.card, d.season, d.episode);
+      var source = detectPlaybackSource(d);
+      var inferred = inferEpisodeFromPlayData(d.card, d);
+      if (inferred && inferred.season && inferred.episode) {
+        d.season = inferred.season;
+        d.episode = inferred.episode;
+      }
+      var hash = hashForPlayback(d.card, d, source);
       if (!hash) return;
 
       var mFile = d.url && d.url.match(/\/stream\/([^?]+)/);
@@ -2782,13 +2876,21 @@
       }
       S.last_player_hash = hash;
       S.last_player_card = d.card;
+      S.last_player_source = source;
 
       var patch = {
+        source: source,
         title: pickTitle(d.card),
         season: d.season,
         episode: d.episode,
       };
-      if (mFile) {
+      if (source === 'online') {
+        patch.online_hash = hash;
+        patch.online_url = d.url;
+        patch.file_name = null;
+        patch.torrent_link = null;
+        patch.file_index = null;
+      } else if (mFile) {
         patch.file_name = decodeURIComponent(mFile[1]);
         if (mLink) patch.torrent_link = mLink[1];
         if (mIdx) patch.file_index = parseInt(mIdx[1], 10);
@@ -2818,8 +2920,10 @@
       }
       S.last_player_hash = null;
       S.last_player_card = null;
+      S.last_player_source = null;
       S.session_play_hash = null;
       S.session_play_card = null;
+      S.session_play_source = null;
       detachPlayerListeners();
       scheduleCardButtonRefresh(playedCard);
       if (h) {
@@ -3576,7 +3680,10 @@
     var percent = 0,
       timeSec = 0,
       timeStr = '';
-    var hash = generateHash(movie, params.season, params.episode);
+    var hash =
+      params.source === 'online' && params.online_hash
+        ? params.online_hash
+        : generateHash(movie, params.season, params.episode);
     var view = safe('Timeline.view', function () {
       return Lampa.Timeline.view(hash);
     });
