@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.2.1';
+    var PLUGIN_VERSION = '2.3.0';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -126,6 +126,33 @@
         freshDays: 180, color: '#F59E0B', image: IMG_BKFC, backdrop: BG_BKFC
     });
 
+    var FOOTBALL_WC_2026 = {
+        id: 'football_wc_2026',
+        title: 'Футбол · ЧМ2026',
+        short: 'Футбол ЧМ2026',
+        queries: [
+            'Чемпионат Мира 2026',
+            'FIFA World Cup 2026',
+            'World Cup 2026 футбол'
+        ],
+        ppvKeywords: [
+            'чемпионат мира 2026',
+            'fifa world cup 2026',
+            'world cup 2026'
+        ],
+        matchKeywords: ['футбол', 'football', 'soccer', 'матч'],
+        excludeKeywords: [
+            'обзор', 'highlights',
+            'пресс конференция', 'press conference',
+            'жеребьевка', 'draw'
+        ],
+        kind: 'football',
+        promotion: 'FIFA',
+        freshDays: 30,
+        color: '#15803D',
+        emoji: '⚽'
+    };
+
     var DAY_NAMES = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
 
     var FILTER_DAYS_OPTIONS = [
@@ -181,6 +208,7 @@
     function defaultFilterState(eventKind) {
         if (eventKind === 'weekly') return { freshDays: 60, sortBy: 'date' };
         if (eventKind === 'ppv')    return { freshDays: 90, sortBy: 'date' };
+        if (eventKind === 'football') return { freshDays: 30, sortBy: 'date' };
         if (eventKind === 'custom') return { freshDays: 0,  sortBy: 'date' };
         return { freshDays: 60, sortBy: 'date' };
     }
@@ -863,6 +891,15 @@
             }
             event._includeKwRe = escParts.length ? new RegExp(escParts.join('|')) : null;
         }
+        if (event.matchKeywords && event.matchKeywords.length) {
+            event._matchKwNorm = event.matchKeywords.map(normalizeText);
+            var matchParts = [];
+            for (var mi = 0; mi < event._matchKwNorm.length; mi++) {
+                if (!event._matchKwNorm[mi]) continue;
+                matchParts.push(escapeRegExp(event._matchKwNorm[mi]));
+            }
+            event._matchKwRe = matchParts.length ? new RegExp(matchParts.join('|')) : null;
+        }
         if (event.queries && event.queries.length) {
             event._queryTokenSets = event.queries.map(tokenize);
         }
@@ -884,6 +921,7 @@
                 var r = results[j];
                 var t = titleNorm(r);
                 if (!(inclRe && inclRe.test(t))) continue;
+                if (event._matchKwRe && !event._matchKwRe.test(t)) continue;
                 var bad = false;
                 for (var ke = 0; ke < excl.length; ke++) {
                     if (excl[ke] && tokenRegex(excl[ke]).test(t)) { bad = true; break; }
@@ -1237,6 +1275,7 @@
             buildSection('Еженедельные шоу', WEEKLY);
             buildSection('PPV / PLE и поиск', [PPV_AGGREGATE, SEARCH_TILE]);
             buildSection('Боевые виды спорта', [UFC_AGGREGATE, BKFC_AGGREGATE]);
+            buildSection('Футбол', [FOOTBALL_WC_2026]);
             buildRecentFeedSection();
             appendAuthorCredit();
         }
@@ -1412,6 +1451,8 @@
                     '<div>Следующий эфир: <b>' + formatDate(nextAir) + '</b></div>';
             } else if (event.kind === 'ppv') {
                 metaHtml += '<div>Агрегатор PPV/PLE для всех промоушенов (WWE, AEW, TNA)</div>';
+            } else if (event.kind === 'football') {
+                metaHtml += '<div>Матчи FIFA World Cup 2026 / Чемпионат Мира 2026. В общую ленту не добавляется.</div>';
             } else if (event.kind === 'custom') {
                 metaHtml += '<div>Свободный поиск · запрос: <b>' + (event.queries && event.queries[0] ? event.queries[0] : '') + '</b></div>';
             }
