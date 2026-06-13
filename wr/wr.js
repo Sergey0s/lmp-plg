@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.2.0';
+    var PLUGIN_VERSION = '2.2.1';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -1150,13 +1150,13 @@
             return el && document.body && document.body.contains(el);
         }
 
-        function refreshController(delay) {
+        function refreshController(delay, preferredTarget) {
             setTimeout(function () {
                 if (!Lampa.Controller.enabled || Lampa.Controller.enabled().name !== 'content') return;
 
                 Lampa.Controller.collectionSet(scroll.render());
 
-                var target = isInDom(lastFocus) ? lastFocus : firstFocusable();
+                var target = isInDom(preferredTarget) ? preferredTarget : (isInDom(lastFocus) ? lastFocus : firstFocusable());
                 if (target) {
                     Lampa.Controller.collectionFocus(target, scroll.render());
                     lastFocus = target;
@@ -1279,8 +1279,46 @@
                 countLabel.text(text || '');
             }
 
+            function feedResultKey(result) {
+                return (result && (result.MagnetUri || result.Link || result.Title + '|' + (result.Size || result.size || ''))) || '';
+            }
+
+            function captureFeedFocus() {
+                if (!lastFocus || !feedContainer[0] || !feedContainer[0].contains(lastFocus)) return null;
+
+                var rows = feedContainer.find('.wrestling-weekly__item');
+                var index = 0;
+                for (var i = 0; i < rows.length; i++) {
+                    if (rows[i] === lastFocus) {
+                        index = i;
+                        break;
+                    }
+                }
+
+                return {
+                    key: lastFocus.wrFeedKey || '',
+                    index: index
+                };
+            }
+
+            function findRestoredFeedFocus(snapshot) {
+                if (!snapshot) return null;
+
+                var rows = feedContainer.find('.wrestling-weekly__item');
+                if (!rows.length) return null;
+
+                if (snapshot.key) {
+                    for (var i = 0; i < rows.length; i++) {
+                        if (rows[i].wrFeedKey === snapshot.key) return rows[i];
+                    }
+                }
+
+                return rows[Math.min(snapshot.index || 0, rows.length - 1)];
+            }
+
             function renderFeed(results, opts) {
                 opts = opts || {};
+                var focusSnapshot = captureFeedFocus();
                 feedContainer.empty();
                 if (!results.length) {
                     if (opts.partial) {
@@ -1305,11 +1343,12 @@
                 var frag = document.createDocumentFragment();
                 for (var i = 0; i < results.length; i++) {
                     var row = buildResultRow(results[i], feedEvt);
+                    row[0].wrFeedKey = feedResultKey(results[i]);
                     trackFocus(row, { clearBackdrop: true });
                     frag.appendChild(row[0]);
                 }
                 feedContainer[0].appendChild(frag);
-                refreshController(250);
+                refreshController(250, findRestoredFeedFocus(focusSnapshot));
             }
 
             function runFeedSearch(forceRefresh) {
