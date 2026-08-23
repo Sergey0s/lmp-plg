@@ -215,10 +215,67 @@ let controllerName = '';
 let startCalls = 0;
 let noties = [];
 let playerPlayCalls = [];
+let playerPlaylistCalls = [];
 let xhrRequests = [];
+let liveXhrs = [];
+let torrentAddHold = false;
+let pendingTorrentAdds = [];
 let activityPushCalls = [];
 let storageSetCalls = [];
 let focusedNode = null;
+const windowEventListeners = {};
+const documentEventListeners = {};
+const intervalCalls = [];
+let clockNow = 0;
+let nextTimerId = 1;
+const clockTasks = new Map();
+
+function scheduleClock(fn, ms, interval) {
+  const id = nextTimerId++;
+  const delay = Math.max(0, Number(ms) || 0);
+  clockTasks.set(id, {
+    id,
+    fn,
+    delay,
+    interval: !!interval,
+    due: clockNow + delay,
+  });
+  return id;
+}
+
+function clearClock(id) {
+  clockTasks.delete(id);
+}
+
+function tick(ms) {
+  const target = clockNow + Math.max(0, Number(ms) || 0);
+  let executions = 0;
+  while (true) {
+    let next = null;
+    clockTasks.forEach((task) => {
+      if (task.due <= target && (!next || task.due < next.due || (task.due === next.due && task.id < next.id))) {
+        next = task;
+      }
+    });
+    if (!next) break;
+    if (++executions > 10000) throw new Error('fake clock runaway at ' + clockNow + 'ms');
+    clockNow = next.due;
+    if (!clockTasks.has(next.id)) continue;
+    if (next.interval) next.due += Math.max(1, next.delay);
+    else clockTasks.delete(next.id);
+    next.fn();
+  }
+  clockNow = target;
+}
+
+function captureEvent(target, event, cb) {
+  (target[event] ||= []).push(cb);
+}
+function captureInterval(fn, ms) {
+  const id = scheduleClock(fn, ms, true);
+  intervalCalls.push({id, fn, ms});
+  return id;
+}
 let torrentGetResponse = {
   preloaded_bytes: 10,
   preload_size: 100,
@@ -229,6 +286,17 @@ let torserverFileStats = [
   {id: 2, path: 'Smoke AutoNext Series S01 E02.mkv'},
 ];
 const timelineStore = {};
+let selectCalls = [];
+const xhrBehavior = {
+  echo: 'success',
+  stream: 'success',
+  torrents: 'success',
+};
+const qaFailures = [];
+
+function qaAssert(condition, message) {
+  if (!condition) qaFailures.push(message);
+}
 
 const Lampa = {
   Storage: {
@@ -294,7 +362,7 @@ const Lampa = {
   Player: {
     play(data) { playerPlayCalls.push(data); },
     callback() {},
-    playlist() {},
+    playlist(data) { playerPlaylistCalls.push(data); },
     listener: {
       follow(event, cb) { (listeners['player:' + event] ||= []).push(cb); },
       remove(event, cb) {
@@ -308,7 +376,15 @@ const Lampa = {
     },
     view(hash) { return timelineStore[hash] || {}; },
     update(data) {
-      if (data && data.hash) timelineStore[data.hash] = Object.assign({}, timelineStore[data.hash] || {}, data);
+      if (data && data.hash) {
+        timelineStore[data.hash] = Object.assign({}, timelineStore[data.hash] || {}, data);
+        const account = Lampa.Account && Lampa.Account.Permit && Lampa.Account.Permit.account;
+        const profile = account && account.profile;
+        const key = profile && typeof profile.id !== 'undefined' ? 'file_view_' + profile.id : 'file_view';
+        const value = Object.assign({}, storage[key] || {});
+        value[data.hash] = Object.assign({}, value[data.hash] || {}, data);
+        Lampa.Storage.set(key, value);
+      }
       (listeners['timeline:update'] || []).forEach((cb) => cb({data: {hash: data.hash, road: data}}));
     },
   },
@@ -329,7 +405,13 @@ const Lampa = {
     },
   },
   Platform: {is() { return false; }},
-  Account: {Permit: {sync: false}},
+  Account: {Permit: {sync: false, account: {profile: {id: 756763}}}},
+  Select: {
+    show(opts) {
+      selectCalls.push(opts);
+      controllerName = 'select';
+    },
+  },
   Manifest: {plugins: []},
   Template: {js() { return nodeFromHtml('<div></div>'); }},
 };
@@ -338,39 +420,30 @@ const sandbox = {
   window: {
     appready: true,
     Lampa,
-    addEventListener() {},
+    addEventListener(event, cb) { captureEvent(windowEventListeners, event, cb); },
     requestAnimationFrame(fn) { return fn(); },
-  setTimeout(fn, ms) {
-    if (ms === 1000) return fn();
-    if (ms <= 100) return fn();
-    if (ms >= 500) return 0;
-    return setTimeout(fn, ms);
-  },
-    clearTimeout,
-    setInterval() { return 0; },
-    clearInterval() {},
+    setTimeout(fn, ms) { return scheduleClock(fn, ms, false); },
+    clearTimeout: clearClock,
+    setInterval: captureInterval,
+    clearInterval: clearClock,
     performance: {memory: {usedJSHeapSize: 10_000_000, totalJSHeapSize: 10_000_000, jsHeapSizeLimit: 1_000_000_000}},
   },
   document: {
+    hidden: false,
     body: {appendChild(node) { bodyChildren.push(node); }},
     createElement() { return {style: {}, children: [], appendChild() {}, remove() {}}; },
     getElementById() { return null; },
-    addEventListener() {},
+    addEventListener(event, cb) { captureEvent(documentEventListeners, event, cb); },
     documentElement: {},
   },
   Lampa,
   $,
   console,
   requestAnimationFrame(fn) { return fn(); },
-  setTimeout(fn, ms) {
-    if (ms === 1000) return fn();
-    if (ms <= 100) return fn();
-    if (ms >= 500) return 0;
-    return setTimeout(fn, ms);
-  },
-  clearTimeout,
-  setInterval() { return 0; },
-  clearInterval() {},
+  setTimeout(fn, ms) { return scheduleClock(fn, ms, false); },
+  clearTimeout: clearClock,
+  setInterval: captureInterval,
+  clearInterval: clearClock,
   performance: {now: () => Date.now(), memory: {usedJSHeapSize: 10_000_000, totalJSHeapSize: 10_000_000, jsHeapSizeLimit: 1_000_000_000}},
   MutationObserver: function () { this.observe = function () {}; this.disconnect = function () {}; },
   XMLHttpRequest: MockXMLHttpRequest,
@@ -424,17 +497,68 @@ MockXMLHttpRequest.prototype.setRequestHeader = function (name, value) {
 };
 
 MockXMLHttpRequest.prototype.send = function (body) {
-  xhrRequests.push({method: this.method, url: this.url, body: body || ''});
+  this.aborted = false;
+  xhrRequests.push({method: this.method, url: this.url, body: body || '', headers: Object.assign({}, this.headers)});
+  const route = /\/echo(?:\?|$)/.test(this.url)
+    ? 'echo'
+    : /\/stream\//.test(this.url)
+      ? 'stream'
+      : /\/torrents$/.test(this.url)
+        ? 'torrents'
+        : null;
+  const behavior = route ? xhrBehavior[route] : 'success';
+  if (behavior === 'network-error') {
+    if (typeof this.onerror === 'function') this.onerror(new Error('simulated network error'));
+    return;
+  }
+  if (behavior === 'timeout') {
+    if (typeof this.ontimeout === 'function') this.ontimeout();
+    return;
+  }
+  if (typeof behavior === 'number') this.status = behavior;
+
+  // Keep GET /stream alive until abort or xhr.timeout — that is the TorrServer
+  // preload connection. Completing it in send() made abort tests impossible.
+  if (this.method === 'GET' && /\/stream\//.test(this.url) && behavior === 'success') {
+    this._live = true;
+    liveXhrs.push(this);
+    const timeoutMs = Number(this.timeout) || 0;
+    if (timeoutMs > 0) {
+      const xhr = this;
+      this._timeoutId = scheduleClock(function () {
+        if (xhr.aborted || !xhr._live) return;
+        xhr._live = false;
+        liveXhrs = liveXhrs.filter((item) => item !== xhr);
+        if (typeof xhr.ontimeout === 'function') xhr.ontimeout();
+      }, timeoutMs);
+    }
+    return;
+  }
+
   if (this.method === 'POST' && /\/torrents$/.test(this.url)) {
     let payload = {};
     try { payload = body ? JSON.parse(body) : {}; } catch (e) {}
     if (payload.action === 'get') {
-      this.responseText = JSON.stringify(torrentGetResponse);
+      const stats = typeof torrentGetResponse === 'function' ? torrentGetResponse() : torrentGetResponse;
+      this.responseText = JSON.stringify(stats || {});
+    } else if (payload.action === 'add' && torrentAddHold) {
+      pendingTorrentAdds.push(this);
+      return;
     } else {
       this.responseText = JSON.stringify({hash: '0123456789abcdef0123456789abcdef01234567'});
     }
   }
   if (typeof this.onload === 'function') this.onload();
+};
+
+MockXMLHttpRequest.prototype.abort = function () {
+  this.aborted = true;
+  this._live = false;
+  liveXhrs = liveXhrs.filter((item) => item !== this);
+  if (this._timeoutId) {
+    clearClock(this._timeoutId);
+    this._timeoutId = 0;
+  }
 };
 
 function addMovieContinueEntry(title) {
@@ -479,15 +603,73 @@ function notifyContinueStorageChanged() {
 }
 
 function seriesHash(title, season, episode) {
-  return Lampa.Utils.hash([season, episode, title].join(''));
+  return Lampa.Utils.hash([season, season > 10 ? ':' : '', episode, title].join(''));
 }
 
 function sendPlayerStart(data) {
   (listeners['player:start'] || []).forEach((cb) => cb(data));
 }
 
+function sendPlayerExternal(data) {
+  (listeners['player:external'] || []).forEach((cb) => cb(data));
+}
+
 function sendPlayerDestroy() {
   (listeners['player:destroy'] || []).forEach((cb) => cb());
+}
+
+function lastBufferModal() {
+  return bodyChildren.filter((node) => String(node.html || '').indexOf('cw-buf') !== -1).pop();
+}
+
+function liveBufferModals() {
+  return bodyChildren.filter((node) => String(node.html || '').indexOf('cw-buf') !== -1 && !node.removed);
+}
+
+function livePreloadXhrs(link) {
+  return liveXhrs.filter((xhr) => {
+    if (!xhr._live || xhr.aborted || !/preload/.test(xhr.url || '')) return false;
+    if (!link) return true;
+    return String(xhr.url).indexOf('link=' + link) !== -1;
+  });
+}
+
+function livePreloadIndexes(link) {
+  return livePreloadXhrs(link)
+    .map((xhr) => {
+      const match = String(xhr.url).match(/[?&]index=(\d+)/);
+      return match ? Number(match[1]) : 0;
+    })
+    .sort((a, b) => a - b);
+}
+
+function flushPendingTorrentAdds() {
+  const queued = pendingTorrentAdds.slice();
+  pendingTorrentAdds = [];
+  queued.forEach((xhr) => {
+    if (xhr.aborted) return;
+    xhr.responseText = JSON.stringify({hash: '0123456789abcdef0123456789abcdef01234567'});
+    xhr.status = 200;
+    if (typeof xhr.onload === 'function') xhr.onload();
+  });
+}
+
+function assertStreamContract(url, opts) {
+  opts = opts || {};
+  qaAssert(!!url && url.indexOf('/stream/') !== -1, 'Stream URL missing /stream/: ' + url);
+  qaAssert(
+    url.indexOf('/stream/' + encodeURIComponent(opts.fileName || 'Movie Test.mkv')) !== -1,
+    'Stream URL must encode file name: ' + url
+  );
+  qaAssert(url.indexOf('link=' + (opts.link || '')) !== -1, 'Stream URL must pass torrent link: ' + url);
+  qaAssert(url.indexOf('index=' + (opts.index || 0)) !== -1, 'Stream URL must pass file index: ' + url);
+  if (opts.preload) {
+    qaAssert(url.indexOf('preload') !== -1, 'Preload request must include preload: ' + url);
+    qaAssert(!/[?&]play(?:&|$)/.test(url), 'Preload request must drop play: ' + url);
+  } else {
+    qaAssert(/[?&]play(?:&|$)/.test(url), 'Playback URL must include play: ' + url);
+    qaAssert(url.indexOf('preload') === -1, 'Playback URL must not request preload: ' + url);
+  }
 }
 
 function openComponent(name, object) {
@@ -609,6 +791,7 @@ if (play.card !== movie) throw new Error('Player.play received wrong card');
 if (!play.url || play.url.indexOf('/stream') === -1) throw new Error('Player.play URL is invalid: ' + play.url);
 if (play.position !== 1234) throw new Error('Player.play position should resume from 1234, got ' + play.position);
 console.log('continue button OK:', play.position, play.url.slice(0, 32) + '...');
+tick(2000);
 
 const beforeExternalLabel = btn.nodes[0].html || '';
 if (beforeExternalLabel.indexOf('20:34') === -1) {
@@ -630,6 +813,7 @@ storage.file_view_756763 = Object.assign({}, storage.file_view_756763 || {}, {
   },
 });
 Lampa.Storage.set('file_view_756763', storage.file_view_756763);
+tick(80);
 
 const refreshedBtn = render.find('.button--continue-watch').first();
 if (!refreshedBtn.length) throw new Error('Continue button disappeared after file_view refresh');
@@ -652,6 +836,7 @@ storage.file_view_756763 = Object.assign({}, storage.file_view_756763 || {}, {
   },
 });
 Lampa.Storage.set('file_view_756763', storage.file_view_756763);
+tick(80);
 const afterZeroEnded = storage.continue_watch_params[continueHash];
 if (!afterZeroEnded || afterZeroEnded.time !== 2050 || afterZeroEnded.duration !== 3600) {
   throw new Error('External 100% time=0 update should not erase saved resume point: ' + JSON.stringify(afterZeroEnded));
@@ -701,6 +886,7 @@ if (playerPlayCalls[0].episode !== 7 || playerPlayCalls[0].position !== 2370) {
 if (!playerPlayCalls[0].playlist || playerPlayCalls[0].playlist.length < 2) {
   throw new Error('Smart-next secondary must keep playlist for player auto-next: ' + JSON.stringify(playerPlayCalls[0].playlist));
 }
+tick(2000);
 playerPlayCalls = [];
 smartBtn.trigger('hover:enter');
 smartModal = bodyChildren[bodyChildren.length - 1];
@@ -709,6 +895,7 @@ if (playerPlayCalls.length !== 1) throw new Error('Smart-next primary should sta
 if (playerPlayCalls[0].episode !== 8 || ![-1, 0].includes(playerPlayCalls[0].position)) {
   throw new Error('Smart-next primary should start S1E8 from beginning: ' + JSON.stringify(playerPlayCalls[0]));
 }
+tick(2000);
 console.log('smart-next confirm OK:', smartTitleText);
 
 const watchedNoNextTitle = 'Smoke Watched No Cached Next';
@@ -756,6 +943,7 @@ $(watchedNoNextModal).find('.cw-cnf__btn--primary').trigger('hover:enter');
 if (playerPlayCalls.length !== 1 || playerPlayCalls[0].episode !== 5) {
   throw new Error('Resolved next episode should launch S1E5: ' + JSON.stringify(playerPlayCalls[0]));
 }
+tick(2000);
 console.log('watched episode resolves next from files OK');
 
 const watchedMissingNextTitle = 'Smoke Watched Missing Next';
@@ -799,6 +987,7 @@ const missingNextNoty = noties.slice(notiesBeforeMissingNext).join(' | ');
 if (missingNextNoty.indexOf('Следующий эпизод не найден') === -1) {
   throw new Error('Missing next episode should notify user, got: ' + missingNextNoty);
 }
+tick(2000);
 console.log('watched episode missing next no-autoplay OK');
 
 const watchedPendingNextTitle = 'Smoke Watched Pending Next';
@@ -834,6 +1023,7 @@ watchedPendingNextBtn.trigger('hover:enter');
 if (playerPlayCalls.length !== 0) {
   throw new Error('100% episode with pending files must not launch current episode from start');
 }
+tick(2000);
 delete sandbox.window.cw.state.files_pending[watchedPendingNextLink];
 console.log('watched episode pending files no-autoplay OK');
 
@@ -889,6 +1079,7 @@ const throwNotFoundCount = noties
 if (throwNotFoundCount !== 1) {
   throw new Error('resolveNextEpisodeFromFiles done() must fire once, not-found count=' + throwNotFoundCount);
 }
+tick(2000);
 // Ensure modal_open was not left dirty so subsequent tests are not affected.
 sandbox.window.cw.state.modal_open = false;
 console.log('Torserver.files exception → files_pending cleaned up, done() called OK');
@@ -914,6 +1105,7 @@ playerPlayCalls = [];
 const bufferBtn = bufferRender.find('.button--continue-watch').first();
 if (!bufferBtn.length) throw new Error('Buffer continue button was not injected');
 bufferBtn.trigger('hover:enter');
+tick(50);
 if (playerPlayCalls.length !== 1) {
   throw new Error('Buffer modal should auto-launch after preload threshold, calls=' + playerPlayCalls.length);
 }
@@ -922,6 +1114,7 @@ if (!bufferPreloadReq || bufferPreloadReq.url.indexOf('preload') === -1) {
   throw new Error('Buffer modal should trigger current-file preload before polling');
 }
 storage.cw_buffer_modal = false;
+tick(1950);
 console.log('buffer modal OK:', playerPlayCalls[0].position);
 
 const deadBufferTitle = 'Smoke Dead Buffer Movie';
@@ -951,6 +1144,7 @@ if (playerPlayCalls.length !== 0) {
 if (Lampa.Controller.controllers.cw_buffer_modal && Lampa.Controller.controllers.cw_buffer_modal.back) {
   Lampa.Controller.controllers.cw_buffer_modal.back();
 }
+tick(2000);
 storage.cw_buffer_modal = false;
 torrentGetResponse = {
   preloaded_bytes: 10,
@@ -1092,6 +1286,7 @@ storage.cw_buffer_modal = true;
 const transitionBtnB = transitionRenderB.find('.button--continue-watch').first();
 if (!transitionBtnB.length) throw new Error('Card B continue button was not injected');
 transitionBtnB.trigger('hover:enter');
+tick(50);
 if (playerPlayCalls.length !== 1 || playerPlayCalls[0].position !== 860) {
   throw new Error('Card B should start from saved position after ready prefetch: ' + JSON.stringify(playerPlayCalls[0]));
 }
@@ -1100,6 +1295,7 @@ if (repeatedTransitionPreload) {
   throw new Error('Card B ready prefetch should not restart from 0, got: ' + repeatedTransitionPreload.url);
 }
 storage.cw_buffer_modal = false;
+tick(1950);
 console.log('prefetch card transition OK:', transitionStateA.last_index + '->' + transitionStateB.last_index);
 
 storage.cw_buffer_pct = 20;
@@ -1140,6 +1336,7 @@ playerPlayCalls = [];
 const readyPrefetchBtn = readyPrefetchRender.find('.button--continue-watch').first();
 if (!readyPrefetchBtn.length) throw new Error('Ready-prefetch continue button was not injected');
 readyPrefetchBtn.trigger('hover:enter');
+tick(50);
 if (playerPlayCalls.length !== 1 || playerPlayCalls[0].position !== 420) {
   throw new Error('Ready prefetch should launch from saved position without waiting: ' + JSON.stringify(playerPlayCalls[0]));
 }
@@ -1148,6 +1345,7 @@ if (repeatedReadyPreload) {
   throw new Error('Ready prefetch must not restart preload for same file, got: ' + repeatedReadyPreload.url);
 }
 storage.cw_buffer_modal = false;
+tick(1950);
 console.log('ready prefetch no-restart OK');
 
 const beforeChangedIndexCount = cw.prefetch().count;
@@ -1209,6 +1407,7 @@ if (playerPlayCalls.length !== 1 || playerPlayCalls[0].position !== 600) {
   throw new Error('Same-torrent buffer should launch current movie at saved position: ' + JSON.stringify(playerPlayCalls[0]));
 }
 storage.cw_buffer_modal = false;
+tick(2000);
 console.log('same-torrent buffer index OK:', sameTorrentBufferPreload.url.match(/index=\d+/)[0]);
 
 const autoNextTitle = 'Smoke AutoNext Series';
@@ -1236,6 +1435,7 @@ const autoBtn = autoRender.find('.button--continue-watch').first();
 if (!autoBtn.length) throw new Error('Auto-next continue button was not injected');
 autoBtn.trigger('hover:enter');
 if (playerPlayCalls.length !== 1) throw new Error('Auto-next continue click did not start player');
+tick(2000);
 
 const h1 = seriesHash(autoNextTitle, 1, 1);
 const h2 = seriesHash(autoNextTitle, 1, 2);
@@ -1304,6 +1504,7 @@ const seasonBoundaryBtn = seasonBoundaryRender.find('.button--continue-watch').f
 if (!seasonBoundaryBtn.length) throw new Error('Season-boundary continue button was not injected');
 seasonBoundaryBtn.trigger('hover:enter');
 if (playerPlayCalls.length !== 1) throw new Error('Season-boundary click did not start player');
+tick(2000);
 const seasonBoundaryPlaylist = playerPlayCalls[0].playlist || [];
 const seasonBoundaryKeys = seasonBoundaryPlaylist.map((item) => `S${item.season}E${item.episode}`);
 if (!seasonBoundaryKeys.includes('S3E1')) {
@@ -1350,6 +1551,7 @@ const cachedSeasonBoundaryBtn = cachedSeasonBoundaryRender.find('.button--contin
 if (!cachedSeasonBoundaryBtn.length) throw new Error('Cached season-boundary continue button was not injected');
 cachedSeasonBoundaryBtn.trigger('hover:enter');
 if (playerPlayCalls.length !== 1) throw new Error('Cached season-boundary click did not start player');
+tick(2000);
 const cachedSeasonBoundaryKeys = (playerPlayCalls[0].playlist || []).map((item) => `S${item.season}E${item.episode}`);
 if (!cachedSeasonBoundaryKeys.includes('S3E1')) {
   throw new Error('Cached playlist should include S3E1 after S2E22: ' + cachedSeasonBoundaryKeys.join(', '));
@@ -1493,6 +1695,7 @@ Lampa.Controller.toggle('menu');
 menuFocusBtn.removeClass('focus');
 focusedNode = null;
 Lampa.Controller.toggle('content');
+tick(0);
 if (!idempotentRender.find('.button--continue-watch').first().hasClass('focus')) {
   throw new Error('Continue button focus must be restored after returning from menu');
 }
@@ -1501,6 +1704,7 @@ idempotentRender.find('.button--continue-watch').first().trigger('hover:enter');
 if (playerPlayCalls.length !== 1) {
   throw new Error('Continue button must start playback after returning from menu');
 }
+tick(2000);
 console.log('menu return focus restore OK');
 
 // =========================================================================
@@ -1709,9 +1913,9 @@ console.log('native player launch touch OK: S1E8 wins latest target');
 const nativeHighSeasonTitle = 'Smoke Native High Season';
 const nativeHighSeasonMovie = {title: nativeHighSeasonTitle, name: nativeHighSeasonTitle, number_of_seasons: 12};
 const nativeHighSeasonHash = seriesHash(nativeHighSeasonTitle, 11, 2);
-const nativeHighSeasonColonHash = Lampa.Utils.hash([11, ':', 2, nativeHighSeasonTitle].join(''));
+const nativeHighSeasonLegacyHash = Lampa.Utils.hash([11, 2, nativeHighSeasonTitle].join(''));
 delete storage.continue_watch_params[nativeHighSeasonHash];
-delete storage.continue_watch_params[nativeHighSeasonColonHash];
+delete storage.continue_watch_params[nativeHighSeasonLegacyHash];
 playerPlayCalls = [];
 Lampa.Player.play({
   card: nativeHighSeasonMovie,
@@ -1723,16 +1927,19 @@ Lampa.Player.play({
 });
 Lampa.Timeline.update({hash: nativeHighSeasonHash, percent: 15, time: 360, duration: 2400});
 const nativeHighSeasonEntry = storage.continue_watch_params[nativeHighSeasonHash];
-if (!nativeHighSeasonEntry || nativeHighSeasonEntry.season !== 11 || nativeHighSeasonEntry.episode !== 2) {
-  throw new Error('S11E2 progress must be saved under Lampa timeline hash with metadata: ' + JSON.stringify(nativeHighSeasonEntry));
-}
-if (nativeHighSeasonEntry.percent !== 15 || nativeHighSeasonEntry.time !== 360) {
-  throw new Error('S11E2 timeline progress was not saved correctly: ' + JSON.stringify(nativeHighSeasonEntry));
-}
-if (storage.continue_watch_params[nativeHighSeasonColonHash]) {
-  throw new Error('S11E2 must not create colon-hash duplicate entry: ' + JSON.stringify(storage.continue_watch_params[nativeHighSeasonColonHash]));
-}
-console.log('native high-season hash compatibility OK');
+qaAssert(
+  nativeHighSeasonEntry && nativeHighSeasonEntry.season === 11 && nativeHighSeasonEntry.episode === 2,
+  'S11E2 progress must use official colon hash with metadata: ' + JSON.stringify(nativeHighSeasonEntry)
+);
+qaAssert(
+  nativeHighSeasonEntry && nativeHighSeasonEntry.percent === 15 && nativeHighSeasonEntry.time === 360,
+  'S11E2 timeline progress must remain on official colon hash: ' + JSON.stringify(nativeHighSeasonEntry)
+);
+qaAssert(
+  !storage.continue_watch_params[nativeHighSeasonLegacyHash],
+  'S11E2 must not create legacy no-colon duplicate: ' + JSON.stringify(storage.continue_watch_params[nativeHighSeasonLegacyHash])
+);
+console.log('native high-season hash contract checked');
 
 // =========================================================================
 // REGRESSION: обычный запуск из списка файлов Lampa может прийти без
@@ -1825,6 +2032,7 @@ const otherTs = storage.continue_watch_params[otherHash].timestamp;
 if (!(launchedTs > otherTs)) {
   throw new Error('Launched episode (S1E' + launchedEpisode + ') timestamp must be > sibling after launchPlayer: launched=' + launchedTs + ' other=' + otherTs);
 }
+tick(2000);
 console.log('launch touch OK: launched S1E' + launchedEpisode + ' wins findStreamParams (ts ' + launchedTs + ' > ' + otherTs + ')');
 
 // =========================================================================
@@ -1948,6 +2156,7 @@ onlineMovieBtn.trigger('hover:enter');
 if (playerPlayCalls.length !== 1 || playerPlayCalls[0].url !== onlineMovieUrl || playerPlayCalls[0].torrent_hash) {
   throw new Error('Online movie Continue must launch online URL without torrent_hash: ' + JSON.stringify(playerPlayCalls[0]));
 }
+tick(2000);
 console.log('online movie source isolation OK');
 
 const onlineSeriesTitle = 'Smoke Online Series';
@@ -1986,10 +2195,784 @@ onlineSeriesBtn.trigger('hover:enter');
 if (playerPlayCalls.length !== 1 || playerPlayCalls[0].url !== onlineSeriesUrl || playerPlayCalls[0].torrent_hash) {
   throw new Error('Online series Continue must launch online URL without torrent_hash: ' + JSON.stringify(playerPlayCalls[0]));
 }
+tick(2000);
 console.log('online series Continue OK');
+
+// =========================================================================
+// REGRESSION: active progress must be persisted silently every 30 seconds and
+// immediately when Android/WebView sends the app to background (Home button).
+// =========================================================================
+const checkpointTitle = 'Smoke Background Checkpoint';
+const checkpointHash = addMovieContinueEntry(checkpointTitle);
+const checkpointMovie = {title: checkpointTitle, name: checkpointTitle};
+sandbox.window.cw.state.last_player_hash = null;
+sandbox.window.cw.state.last_player_card = null;
+sandbox.window.cw.state.session_play_hash = checkpointHash;
+sandbox.window.cw.state.session_play_card = checkpointMovie;
+timelineStore[checkpointHash] = {
+  hash: checkpointHash,
+  percent: 48,
+  time: 1440,
+  duration: 3000,
+};
+storage.file_view = Object.assign({}, storage.file_view || {}, {
+  [checkpointHash]: {
+    hash: checkpointHash,
+    percent: 20,
+    time: 600,
+    duration: 3000,
+  },
+});
+storageSetCalls = [];
+const notiesBeforeCheckpoint = noties.length;
+const checkpointInterval = intervalCalls.find((item) => item.ms === 30000);
+if (!checkpointInterval) throw new Error('30-second progress checkpoint interval was not registered');
+checkpointInterval.fn();
+const intervalEntry = storage.continue_watch_params[checkpointHash];
+if (!intervalEntry || intervalEntry.percent !== 48 || intervalEntry.time !== 1440) {
+  throw new Error('30-second checkpoint did not capture timeline progress: ' + JSON.stringify(intervalEntry));
+}
+if (!storageSetCalls.some((call) => call.key === 'continue_watch_params')) {
+  throw new Error('30-second checkpoint must synchronously persist continue_watch_params');
+}
+if (noties.length !== notiesBeforeCheckpoint) {
+  throw new Error('Background checkpoint must not show notifications: ' + noties.slice(notiesBeforeCheckpoint).join(' | '));
+}
+console.log('silent 30-second checkpoint OK');
+
+timelineStore[checkpointHash] = {
+  hash: checkpointHash,
+  percent: 67,
+  time: 2010,
+  duration: 3000,
+};
+storageSetCalls = [];
+sandbox.document.hidden = true;
+(documentEventListeners.visibilitychange || []).forEach((cb) => cb());
+const hiddenEntry = storage.continue_watch_params[checkpointHash];
+if (!hiddenEntry || hiddenEntry.percent !== 67 || hiddenEntry.time !== 2010) {
+  throw new Error('visibility hidden checkpoint did not save progress: ' + JSON.stringify(hiddenEntry));
+}
+if (!storageSetCalls.some((call) => call.key === 'continue_watch_params')) {
+  throw new Error('visibility hidden checkpoint must synchronously persist storage');
+}
+if (sandbox.window.cw.state.session_play_hash !== checkpointHash) {
+  throw new Error('Eco cleanup must preserve active playback context after Home/background');
+}
+if (noties.length !== notiesBeforeCheckpoint) {
+  throw new Error('Home/background checkpoint must not show notifications: ' + noties.slice(notiesBeforeCheckpoint).join(' | '));
+}
+sandbox.document.hidden = false;
+console.log('Home/background emergency checkpoint OK');
+
+// =========================================================================
+// QA CYCLE: deterministic lifecycle/race coverage (Android TV + ViMu)
+// =========================================================================
+
+// D1: a stale files_pending flag must be released after the 12 × 300ms wait.
+const pendingLeakTitle = 'QA Pending Timeout Series';
+const pendingLeakLink = 'magnet:?xt=urn:btih:abababababababababababababababababababab';
+addSeriesEntry(pendingLeakTitle, 1, 4, {
+  percent: 100,
+  time: 2400,
+  duration: 2400,
+  file_index: 4,
+  torrent_link: pendingLeakLink,
+  timestamp: Date.now() + 200000,
+});
+const pendingLeakMovie = {title: pendingLeakTitle, name: pendingLeakTitle, number_of_seasons: 1};
+const pendingLeakRender = makeCardRender();
+activeActivity = {component: 'full', movie: pendingLeakMovie, activity: {render: () => pendingLeakRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: pendingLeakMovie}, object: activeActivity});
+delete sandbox.window.cw.state.files[pendingLeakLink];
+sandbox.window.cw.state.files_pending[pendingLeakLink] = true;
+const pendingLeakBtn = pendingLeakRender.find('.button--continue-watch').first();
+pendingLeakBtn.trigger('hover:enter');
+tick(3600);
+qaAssert(
+  !sandbox.window.cw.state.files_pending[pendingLeakLink],
+  'D1 files_pending remains set after 3.6s timeout; repeated smart-next waits again'
+);
+delete sandbox.window.cw.state.files_pending[pendingLeakLink];
+
+// Slow TorrServer: start the current episode at 3.5s, then accept a late playlist.
+const slowTitle = 'QA Slow TorrServer Series';
+const slowLink = 'magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd';
+addSeriesEntry(slowTitle, 1, 1, {
+  percent: 30,
+  time: 700,
+  file_index: 1,
+  torrent_link: slowLink,
+  timestamp: Date.now() + 210000,
+});
+storage.cw_prefetch = false;
+sandbox.window.cw.prefetch(false);
+delete sandbox.window.cw.state.files[slowLink];
+delete sandbox.window.cw.state.files_pending[slowLink];
+const originalSlowFiles = Lampa.Torserver.files;
+let lateFilesOk = null;
+Lampa.Torserver.files = function (hash, ok) {
+  lateFilesOk = ok;
+};
+const slowMovie = {title: slowTitle, name: slowTitle, number_of_seasons: 1};
+const slowRender = makeCardRender();
+activeActivity = {component: 'full', movie: slowMovie, activity: {render: () => slowRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: slowMovie}, object: activeActivity});
+playerPlayCalls = [];
+playerPlaylistCalls = [];
+slowRender.find('.button--continue-watch').first().trigger('hover:enter');
+tick(3499);
+qaAssert(playerPlayCalls.length === 0, 'Slow playlist fallback started before 3.5s deadline');
+tick(1);
+qaAssert(playerPlayCalls.length === 1, 'Slow playlist fallback did not start current episode at 3.5s');
+if (lateFilesOk) {
+  lateFilesOk({
+    file_stats: [
+      {id: 1, path: `${slowTitle} S01 E01.mkv`},
+      {id: 2, path: `${slowTitle} S01 E02.mkv`},
+    ],
+  });
+}
+qaAssert(
+  playerPlaylistCalls.length === 1 && playerPlaylistCalls[0].length === 2,
+  'Late TorrServer result did not update Player.playlist exactly once'
+);
+Lampa.Torserver.files = originalSlowFiles;
+
+// ViMu contract: external without start, progress arrives through Timeline/file_view.
+const vimuTitle = 'QA ViMu External Movie';
+const vimuHash = addMovieContinueEntry(vimuTitle);
+const vimuMovie = {title: vimuTitle, name: vimuTitle};
+const vimuRender = makeCardRender();
+activeActivity = {component: 'full', movie: vimuMovie, activity: {render: () => vimuRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: vimuMovie}, object: activeActivity});
+playerPlayCalls = [];
+vimuRender.find('.button--continue-watch').first().trigger('hover:enter');
+sendPlayerExternal({card: vimuMovie});
+Lampa.Timeline.update({hash: vimuHash, percent: 64, time: 2304, duration: 3600});
+tick(80);
+const vimuEntry = storage.continue_watch_params[vimuHash];
+qaAssert(
+  vimuEntry && vimuEntry.percent === 64 && vimuEntry.time === 2304,
+  'ViMu external return without player:start did not sync file_view progress'
+);
+qaAssert(
+  (vimuRender.find('.button--continue-watch').first().nodes[0].html || '').indexOf('38:24') !== -1,
+  'ViMu external return did not refresh Continue position'
+);
+tick(1920);
+
+// Buffer UX: a failed /echo health-check must keep the modal open and never autoplay.
+const pingFailTitle = 'QA TorrServer Ping Failure';
+addMovieContinueEntry(pingFailTitle);
+const pingFailMovie = {title: pingFailTitle, name: pingFailTitle};
+const pingFailRender = makeCardRender();
+storage.cw_buffer_modal = true;
+xhrBehavior.echo = 'network-error';
+activeActivity = {component: 'full', movie: pingFailMovie, activity: {render: () => pingFailRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: pingFailMovie}, object: activeActivity});
+playerPlayCalls = [];
+pingFailRender.find('.button--continue-watch').first().trigger('hover:enter');
+qaAssert(playerPlayCalls.length === 0, 'TorrServer ping failure must not autoplay');
+qaAssert(
+  controllerName === 'cw_buffer_modal' && typeof sandbox.window.cw.state.buffer_close === 'function',
+  'TorrServer ping failure must leave a cancellable buffer modal open'
+);
+Lampa.Controller.controllers.cw_buffer_modal.back();
+xhrBehavior.echo = 'success';
+storage.cw_buffer_modal = false;
+tick(2000);
+
+// =========================================================================
+// QA: TorrServer stream contract, buffer fill, speed limits
+// =========================================================================
+storage.cw_prefetch = false;
+sandbox.window.cw.prefetch(false);
+storage.cw_buffer_modal = true;
+storage.cw_buffer_pct = 20;
+storage.player_torrent = 'tizen';
+
+function openTorrentBufferCard(title, extras) {
+  extras = extras || {};
+  const hash = addMovieContinueEntry(title);
+  Object.assign(storage.continue_watch_params[hash], extras);
+  notifyContinueStorageChanged();
+  const movie = {title, name: title};
+  const render = makeCardRender();
+  activeActivity = {component: 'full', movie, activity: {render: () => render}};
+  Lampa.Listener.send('full', {type: 'complite', data: {movie}, object: activeActivity});
+  return {hash, movie, render, entry: storage.continue_watch_params[hash]};
+}
+
+const streamTitle = 'QA Stream Contract Movie';
+const streamLink = 'magnet:?xt=urn:btih:feedfeedfeedfeedfeedfeedfeedfeedfeedfeed';
+const streamFile = 'QA Stream Contract Movie.mkv';
+xhrRequests = [];
+playerPlayCalls = [];
+torrentGetResponse = {
+  preloaded_bytes: 80,
+  preload_size: 100,
+  download_speed: 200 * 1024,
+};
+const streamCard = openTorrentBufferCard(streamTitle, {
+  torrent_link: streamLink,
+  file_name: streamFile,
+  file_index: 7,
+});
+streamCard.render.find('.button--continue-watch').first().trigger('hover:enter');
+tick(50);
+const playUrl = playerPlayCalls[0] && playerPlayCalls[0].url;
+assertStreamContract(playUrl, {fileName: streamFile, link: streamLink, index: 7});
+qaAssert(
+  playerPlayCalls[0] && playerPlayCalls[0].torrent_hash === streamLink,
+  'Non-inner player must keep torrent_hash for torrent client / ViMu: ' + JSON.stringify(playerPlayCalls[0])
+);
+const streamPreloadReq = xhrRequests.find((r) => r.method === 'GET' && /\/stream\//.test(r.url));
+assertStreamContract(streamPreloadReq && streamPreloadReq.url, {
+  fileName: streamFile,
+  link: streamLink,
+  index: 7,
+  preload: true,
+});
+const statusReq = xhrRequests.find((r) => r.method === 'POST' && /\/torrents$/.test(r.url) && String(r.body).indexOf('"get"') !== -1);
+qaAssert(!!statusReq, 'Buffer poll must POST /torrents action=get');
+qaAssert(
+  statusReq && statusReq.headers && statusReq.headers['Content-Type'] === 'text/plain;charset=UTF-8',
+  'TorrServer status poll must use text/plain to avoid CORS preflight: ' + JSON.stringify(statusReq && statusReq.headers)
+);
+tick(1950);
+
+// Slow fill: speed below BUFFER_MIN_SPEED (50 KB/s) must still wait until buffer %.
+let fillPolls = 0;
+torrentGetResponse = function () {
+  fillPolls++;
+  return {
+    preloaded_bytes: Math.min(100, 8 * fillPolls),
+    preload_size: 100,
+    download_speed: 20 * 1024,
+    connected_seeders: 1,
+    peers: 4,
+  };
+};
+playerPlayCalls = [];
+xhrRequests = [];
+const slowFillCard = openTorrentBufferCard('QA Slow Buffer Fill', {
+  torrent_link: 'magnet:?xt=urn:btih:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1',
+  file_name: 'QA Slow Buffer Fill.mkv',
+  file_index: 0,
+});
+slowFillCard.render.find('.button--continue-watch').first().trigger('hover:enter');
+qaAssert(playerPlayCalls.length === 0, 'First buffer poll at 8% must not auto-launch');
+const fillModal = lastBufferModal();
+qaAssert(
+  $(fillModal).find('.cw-buf__pct').text() === '8%',
+  'Buffer modal must show first poll percent, got: ' + $(fillModal).find('.cw-buf__pct').text()
+);
+qaAssert(
+  /20 KB\/s/.test($(fillModal).find('.cw-buf__speed').text()),
+  'Buffer modal must show throttled speed, got: ' + $(fillModal).find('.cw-buf__speed').text()
+);
+tick(1000);
+qaAssert(playerPlayCalls.length === 0, 'Second poll at 16% must still wait for 20% threshold');
+tick(1000);
+qaAssert(playerPlayCalls.length === 1, 'Buffer must auto-launch once fill reaches threshold despite 20 KB/s');
+qaAssert(
+  playerPlayCalls[0] && /[?&]play(?:&|$)/.test(playerPlayCalls[0].url) && playerPlayCalls[0].url.indexOf('preload') === -1,
+  'Auto-launch after fill must hand play URL, not preload: ' + (playerPlayCalls[0] && playerPlayCalls[0].url)
+);
+tick(2000);
+
+// Incomplete buffer + throttled speed: never autoplay.
+torrentGetResponse = {
+  preloaded_bytes: 12,
+  preload_size: 100,
+  download_speed: 10 * 1024,
+  connected_seeders: 1,
+  peers: 8,
+};
+playerPlayCalls = [];
+const throttleCard = openTorrentBufferCard('QA Throttled Incomplete Buffer', {
+  torrent_link: 'magnet:?xt=urn:btih:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2',
+  file_name: 'QA Throttled Incomplete Buffer.mkv',
+});
+throttleCard.render.find('.button--continue-watch').first().trigger('hover:enter');
+tick(8000);
+qaAssert(playerPlayCalls.length === 0, 'Throttled torrent below buffer threshold must not auto-launch');
+$(lastBufferModal()).find('.cw-buf__btn--launch').trigger('hover:enter');
+qaAssert(playerPlayCalls.length === 1, 'Запустить сейчас must start playback while buffer is still filling');
+tick(2000);
+
+// Full buffer with speed=0 (preload already finished) must auto-launch.
+torrentGetResponse = {
+  preloaded_bytes: 100,
+  preload_size: 100,
+  download_speed: 0,
+  peers: 0,
+};
+playerPlayCalls = [];
+const fullZeroSpeed = openTorrentBufferCard('QA Full Buffer Zero Speed', {
+  torrent_link: 'magnet:?xt=urn:btih:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3',
+  file_name: 'QA Full Buffer Zero Speed.mkv',
+});
+fullZeroSpeed.render.find('.button--continue-watch').first().trigger('hover:enter');
+qaAssert(playerPlayCalls.length === 1, 'Completed preload with 0 KB/s must still auto-launch');
+tick(2000);
+
+// No preload_size: only autoplay if loaded>5MB AND speed > 50 KB/s.
+torrentGetResponse = {
+  preloaded_bytes: 0,
+  preload_size: 0,
+  loaded_size: 6 * 1024 * 1024,
+  download_speed: 30 * 1024,
+  peers: 3,
+};
+playerPlayCalls = [];
+const noPreloadSlow = openTorrentBufferCard('QA No Preload Size Slow', {
+  torrent_link: 'magnet:?xt=urn:btih:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4',
+  file_name: 'QA No Preload Size Slow.mkv',
+});
+noPreloadSlow.render.find('.button--continue-watch').first().trigger('hover:enter');
+tick(3000);
+qaAssert(playerPlayCalls.length === 0, 'No preload_size + speed below 50 KB/s must not auto-launch even with 6MB loaded');
+if (Lampa.Controller.controllers.cw_buffer_modal && Lampa.Controller.controllers.cw_buffer_modal.back) {
+  Lampa.Controller.controllers.cw_buffer_modal.back();
+}
+tick(2000);
+
+torrentGetResponse = {
+  preloaded_bytes: 0,
+  preload_size: 0,
+  loaded_size: 6 * 1024 * 1024,
+  download_speed: 60 * 1024,
+  peers: 3,
+};
+playerPlayCalls = [];
+const noPreloadFast = openTorrentBufferCard('QA No Preload Size Fast', {
+  torrent_link: 'magnet:?xt=urn:btih:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5',
+  file_name: 'QA No Preload Size Fast.mkv',
+});
+noPreloadFast.render.find('.button--continue-watch').first().trigger('hover:enter');
+qaAssert(playerPlayCalls.length === 1, 'No preload_size fallback must auto-launch when loaded>5MB and speed>50 KB/s');
+tick(2000);
+
+// Cancel must stop polling so a later stats jump cannot start the player.
+torrentGetResponse = {
+  preloaded_bytes: 5,
+  preload_size: 100,
+  download_speed: 8 * 1024,
+};
+playerPlayCalls = [];
+const cancelCard = openTorrentBufferCard('QA Buffer Cancel Stops Poll', {
+  torrent_link: 'magnet:?xt=urn:btih:f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6',
+  file_name: 'QA Buffer Cancel Stops Poll.mkv',
+});
+cancelCard.render.find('.button--continue-watch').first().trigger('hover:enter');
+$(lastBufferModal()).find('.cw-buf__btn--cancel').trigger('hover:enter');
+torrentGetResponse = {
+  preloaded_bytes: 100,
+  preload_size: 100,
+  download_speed: 200 * 1024,
+};
+tick(4000);
+qaAssert(playerPlayCalls.length === 0, 'Cancelled buffer poll must not auto-launch after later 100% stats');
+
+// =========================================================================
+// QA: next-episode prefetch must not compete with the current file's buffer
+// =========================================================================
+const gateTitle = 'QA Prefetch Gate Series';
+const gateLink = 'magnet:?xt=urn:btih:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a';
+addSeriesEntry(gateTitle, 1, 7, {
+  percent: 99,
+  time: 2380,
+  duration: 2400,
+  file_index: 7,
+  torrent_link: gateLink,
+  file_name: `${gateTitle} S01 E07.mkv`,
+  timestamp: Date.now() + 300000,
+});
+addSeriesEntry(gateTitle, 1, 8, {
+  percent: 0,
+  time: 0,
+  duration: 2400,
+  file_index: 8,
+  torrent_link: gateLink,
+  file_name: `${gateTitle} S01 E08.mkv`,
+  timestamp: Date.now() + 290000,
+});
+const gateMovie = {title: gateTitle, name: gateTitle, number_of_seasons: 1};
+
+storage.cw_buffer_modal = true;
+storage.cw_buffer_pct = 20;
+sandbox.window.cw.prefetch(false);
+sandbox.window.cw.prefetch(true, 20);
+delete sandbox.window.cw.state.files[gateLink];
+delete sandbox.window.cw.state.files_pending[gateLink];
+
+// Current file is starved: preload stays far below the 20% threshold.
+torrentGetResponse = {
+  preloaded_bytes: 8,
+  preload_size: 100,
+  download_speed: 15 * 1024,
+  connected_seeders: 2,
+  peers: 250,
+};
+
+const gateRender = makeCardRender();
+activeActivity = {component: 'full', movie: gateMovie, activity: {render: () => gateRender}};
+xhrRequests = [];
+Lampa.Listener.send('full', {type: 'complite', data: {movie: gateMovie}, object: activeActivity});
+qaAssert(
+  xhrRequests.some((r) => r.method === 'GET' && /index=8/.test(r.url) && /preload/.test(r.url)),
+  'Card open should warm the next episode before playback starts'
+);
+
+playerPlayCalls = [];
+gateRender.find('.button--continue-watch').first().trigger('hover:enter');
+const gateConfirm = bodyChildren[bodyChildren.length - 1];
+$(gateConfirm).find('.cw-cnf__btn--secondary').trigger('hover:enter');
+tick(50);
+const gateBufferModal = lastBufferModal();
+qaAssert(!!gateBufferModal, 'Finishing the current episode must open its buffer modal');
+$(gateBufferModal).find('.cw-buf__btn--launch').trigger('hover:enter');
+qaAssert(playerPlayCalls.length === 1, 'Запустить сейчас must start the under-buffered current episode');
+
+// Android TV re-renders the card right after launch; that must not restart
+// next-episode prefetch while the current file is still starved.
+const gatePrefetchBefore = sandbox.window.cw.prefetch().count;
+xhrRequests = [];
+const gateRenderDuringPlayback = makeCardRender();
+activeActivity = {
+  component: 'full',
+  movie: gateMovie,
+  activity: {render: () => gateRenderDuringPlayback},
+};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: gateMovie}, object: activeActivity});
+tick(3000);
+qaAssert(
+  !xhrRequests.some((r) => r.method === 'GET' && /index=8/.test(r.url) && /preload/.test(r.url)),
+  'Next-episode preload must be suspended while the current file is below the buffer threshold'
+);
+qaAssert(
+  sandbox.window.cw.prefetch().count === gatePrefetchBefore,
+  'Next-episode prefetch must not restart while the current file is still buffering'
+);
+
+// Once the current file reaches the threshold, prefetch is allowed again.
+torrentGetResponse = {
+  preloaded_bytes: 40,
+  preload_size: 100,
+  download_speed: 400 * 1024,
+  connected_seeders: 12,
+  peers: 250,
+};
+xhrRequests = [];
+tick(6000);
+const gateRenderAfterBuffer = makeCardRender();
+activeActivity = {
+  component: 'full',
+  movie: gateMovie,
+  activity: {render: () => gateRenderAfterBuffer},
+};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: gateMovie}, object: activeActivity});
+tick(3000);
+qaAssert(
+  xhrRequests.some((r) => r.method === 'GET' && /index=8/.test(r.url) && /preload/.test(r.url)),
+  'Next-episode prefetch must resume once the current file buffer reaches the threshold'
+);
+
+// The gate must never stick: an unrelated card still prefetches normally.
+sendPlayerDestroy();
+tick(4000);
+const unrelatedGateTitle = 'QA Prefetch Gate Unrelated';
+const unrelatedGateLink = 'magnet:?xt=urn:btih:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b';
+addSeriesEntry(unrelatedGateTitle, 1, 2, {
+  percent: 99,
+  time: 2380,
+  duration: 2400,
+  file_index: 2,
+  torrent_link: unrelatedGateLink,
+  file_name: `${unrelatedGateTitle} S01 E02.mkv`,
+  timestamp: Date.now() + 320000,
+});
+addSeriesEntry(unrelatedGateTitle, 1, 3, {
+  percent: 0,
+  file_index: 3,
+  torrent_link: unrelatedGateLink,
+  file_name: `${unrelatedGateTitle} S01 E03.mkv`,
+  timestamp: Date.now() + 310000,
+});
+const unrelatedGateMovie = {
+  title: unrelatedGateTitle,
+  name: unrelatedGateTitle,
+  number_of_seasons: 1,
+};
+const unrelatedGateRender = makeCardRender();
+activeActivity = {
+  component: 'full',
+  movie: unrelatedGateMovie,
+  activity: {render: () => unrelatedGateRender},
+};
+xhrRequests = [];
+Lampa.Listener.send('full', {type: 'complite', data: {movie: unrelatedGateMovie}, object: activeActivity});
+qaAssert(
+  xhrRequests.some((r) => r.method === 'GET' && /index=3/.test(r.url) && /preload/.test(r.url)),
+  'Prefetch gate must not stay closed for unrelated cards'
+);
+
+sandbox.window.cw.prefetch(false);
+storage.cw_buffer_modal = false;
+storage.cw_buffer_pct = 5;
+storage.player_torrent = 'inner';
+torrentGetResponse = {
+  preloaded_bytes: 10,
+  preload_size: 100,
+  download_speed: 2048,
+};
+tick(4000);
+
+// =========================================================================
+// QA: concurrent TorrServer preloads / orphan XHR / stacked buffer modal
+// =========================================================================
+storage.cw_buffer_modal = true;
+storage.cw_buffer_pct = 20;
+sandbox.window.cw.prefetch(true, 20);
+torrentGetResponse = {
+  preloaded_bytes: 8,
+  preload_size: 100,
+  download_speed: 15 * 1024,
+  connected_seeders: 2,
+  peers: 250,
+};
+
+function setupConcurrentSeries(title, link, currentIndex) {
+  addSeriesEntry(title, 1, currentIndex, {
+    percent: 99,
+    time: 2380,
+    duration: 2400,
+    file_index: currentIndex,
+    torrent_link: link,
+    file_name: `${title} S01 E${String(currentIndex).padStart(2, '0')}.mkv`,
+    timestamp: Date.now() + 400000,
+  });
+  addSeriesEntry(title, 1, currentIndex + 1, {
+    percent: 0,
+    time: 0,
+    duration: 2400,
+    file_index: currentIndex + 1,
+    torrent_link: link,
+    file_name: `${title} S01 E${String(currentIndex + 1).padStart(2, '0')}.mkv`,
+    timestamp: Date.now() + 390000,
+  });
+  const movie = {title, name: title, number_of_seasons: 1};
+  const render = makeCardRender();
+  delete sandbox.window.cw.state.files[link];
+  delete sandbox.window.cw.state.files_pending[link];
+  activeActivity = {component: 'full', movie, activity: {render: () => render}};
+  Lampa.Listener.send('full', {type: 'complite', data: {movie}, object: activeActivity});
+  return {movie, render};
+}
+
+function confirmContinueCurrent(render) {
+  render.find('.button--continue-watch').first().trigger('hover:enter');
+  const confirm = bodyChildren[bodyChildren.length - 1];
+  $(confirm).find('.cw-cnf__btn--secondary').trigger('hover:enter');
+  tick(50);
+}
+
+// P0-2: while the buffer modal is open, a card re-render must not start
+// next-episode preload. Gate is currently armed only on launch.
+const overlapTitle = 'QA Concurrent Buffer Prefetch';
+const overlapLink = 'magnet:?xt=urn:btih:1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c';
+const overlap = setupConcurrentSeries(overlapTitle, overlapLink, 4);
+qaAssert(
+  livePreloadIndexes(overlapLink).indexOf(5) !== -1,
+  'Card open must start next-episode preload before Continue'
+);
+confirmContinueCurrent(overlap.render);
+qaAssert(!!lastBufferModal(), 'Continue current must open the buffer modal');
+const overlapRerender = makeCardRender();
+activeActivity = {
+  component: 'full',
+  movie: overlap.movie,
+  activity: {render: () => overlapRerender},
+};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: overlap.movie}, object: activeActivity});
+tick(1500);
+qaAssert(
+  livePreloadIndexes(overlapLink).indexOf(5) === -1,
+  'P0-2: next-episode preload must not be live while the current file buffer modal is open, got indexes ' + livePreloadIndexes(overlapLink).join(',')
+);
+qaAssert(
+  livePreloadIndexes(overlapLink).indexOf(4) !== -1,
+  'P0-2: current file preload must stay active in the buffer modal'
+);
+
+// P0-1: closing the modal must abort the current-file preload XHR so cancel
+// + resumed next prefetch cannot keep two files downloading.
+$(lastBufferModal()).find('.cw-buf__btn--cancel').trigger('hover:enter');
+qaAssert(
+  livePreloadIndexes(overlapLink).indexOf(4) === -1,
+  'P0-1: cancel must abort the current-file preload XHR, still live: ' + livePreloadIndexes(overlapLink).join(',')
+);
+
+// P1-1: a second launchPlayer must close the first buffer modal.
+const stackTitle = 'QA Stacked Buffer Modal';
+const stackLink = 'magnet:?xt=urn:btih:2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d';
+const stack = setupConcurrentSeries(stackTitle, stackLink, 1);
+confirmContinueCurrent(stack.render);
+qaAssert(liveBufferModals().length === 1, 'First Continue must leave exactly one buffer modal');
+stack.render.find('.button--continue-watch').first().trigger('hover:enter');
+const stackedConfirm = bodyChildren
+  .filter((node) => String(node.html || '').indexOf('cw-cnf') !== -1 && !node.removed)
+  .pop();
+if (stackedConfirm) $(stackedConfirm).find('.cw-cnf__btn--secondary').trigger('hover:enter');
+tick(50);
+qaAssert(
+  liveBufferModals().length === 1,
+  'P1-1: second Continue must close the previous buffer modal, open=' + liveBufferModals().length
+);
+if (lastBufferModal()) $(lastBufferModal()).find('.cw-buf__btn--cancel').trigger('hover:enter');
+
+// P0-3: late getTorrentHash callback must not start preload for a stale index.
+torrentAddHold = true;
+const staleTitle = 'QA Stale Prefetch Hash';
+const staleLink = 'http://192.168.31.244:8090/qa-stale-prefetch.torrent';
+const stale = setupConcurrentSeries(staleTitle, staleLink, 9);
+qaAssert(pendingTorrentAdds.length > 0, 'Non-magnet prefetch must wait on POST /torrents add');
+sandbox.window.cw.state.prefetch_hash = '0123456789abcdef0123456789abcdef01234567';
+confirmContinueCurrent(stale.render);
+qaAssert(!!lastBufferModal(), 'P0-3 setup must open buffer modal with seeded hash');
+flushPendingTorrentAdds();
+torrentAddHold = false;
+qaAssert(
+  livePreloadIndexes(staleLink).indexOf(10) === -1,
+  'P0-3: late hash callback must not start next-episode preload while buffering current, live=' + livePreloadIndexes(staleLink).join(',')
+);
+qaAssert(
+  livePreloadIndexes(staleLink).every((idx) => idx === 9),
+  'P0-3: current file preload must remain the only active stream, live=' + livePreloadIndexes(staleLink).join(',')
+);
+if (lastBufferModal()) $(lastBufferModal()).find('.cw-buf__btn--cancel').trigger('hover:enter');
+
+sandbox.window.cw.prefetch(false);
+storage.cw_buffer_modal = false;
+storage.cw_buffer_pct = 5;
+storage.player_torrent = 'inner';
+torrentGetResponse = {
+  preloaded_bytes: 10,
+  preload_size: 100,
+  download_speed: 2048,
+};
+tick(4000);
+
+// Context menus: movie reset/mark-watched and series previous/next actions.
+const contextMovieTitle = 'QA Context Movie';
+const contextMovieHash = addMovieContinueEntry(contextMovieTitle);
+const contextMovie = {title: contextMovieTitle, name: contextMovieTitle};
+const contextMovieRender = makeCardRender();
+activeActivity = {component: 'full', movie: contextMovie, activity: {render: () => contextMovieRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: contextMovie}, object: activeActivity});
+selectCalls = [];
+contextMovieRender.find('.button--continue-watch').first().trigger('hover:long');
+let contextOpts = selectCalls[selectCalls.length - 1];
+qaAssert(
+  contextOpts && contextOpts.items.some((item) => /просмотренный/.test(item.title)) &&
+    contextOpts.items.some((item) => /Сбросить/.test(item.title)),
+  'Movie context menu must expose mark-watched and reset actions'
+);
+if (contextOpts) contextOpts.onSelect(contextOpts.items.find((item) => /просмотренный/.test(item.title)));
+qaAssert(storage.continue_watch_params[contextMovieHash].percent === 100, 'Movie mark-watched action did not persist 100%');
+contextMovieRender.find('.button--continue-watch').first().trigger('hover:long');
+contextOpts = selectCalls[selectCalls.length - 1];
+if (contextOpts) contextOpts.onSelect(contextOpts.items.find((item) => /Сбросить/.test(item.title)));
+qaAssert(storage.continue_watch_params[contextMovieHash].percent === 0, 'Movie reset action did not clear progress');
+
+const contextSeriesTitle = 'QA Context Series';
+addSeriesEntry(contextSeriesTitle, 1, 1, {percent: 100, timestamp: Date.now() + 100});
+addSeriesEntry(contextSeriesTitle, 1, 2, {percent: 40, timestamp: Date.now() + 300});
+addSeriesEntry(contextSeriesTitle, 1, 3, {percent: 0, timestamp: Date.now() + 200});
+const contextSeriesMovie = {title: contextSeriesTitle, name: contextSeriesTitle, number_of_seasons: 1};
+const contextSeriesRender = makeCardRender();
+activeActivity = {component: 'full', movie: contextSeriesMovie, activity: {render: () => contextSeriesRender}};
+Lampa.Listener.send('full', {type: 'complite', data: {movie: contextSeriesMovie}, object: activeActivity});
+selectCalls = [];
+contextSeriesRender.find('.button--continue-watch').first().trigger('hover:long');
+contextOpts = selectCalls[selectCalls.length - 1];
+const prevAction = contextOpts && contextOpts.items.find((item) => /предыдущему/.test(item.title));
+const nextAction = contextOpts && contextOpts.items.find((item) => /следующий/.test(item.title));
+qaAssert(prevAction && nextAction, 'Series context menu must expose previous and next actions');
+playerPlayCalls = [];
+if (prevAction) contextOpts.onSelect(prevAction);
+qaAssert(playerPlayCalls.length === 1 && playerPlayCalls[0].episode === 1, 'Previous context action must launch E1');
+contextSeriesRender.find('.button--continue-watch').first().trigger('hover:long');
+contextOpts = selectCalls[selectCalls.length - 1];
+const freshNextAction = contextOpts && contextOpts.items.find((item) => /следующий/.test(item.title));
+playerPlayCalls = [];
+if (freshNextAction) contextOpts.onSelect(freshNextAction);
+qaAssert(playerPlayCalls.length === 1 && playerPlayCalls[0].episode === 3, 'Next context action must launch E3');
+
+// Android lifecycle events must checkpoint silently without discarding playback context.
+const lifecycleNoties = noties.length;
+const lifecycleHash = sandbox.window.cw.state.session_play_hash;
+(windowEventListeners.pagehide || []).forEach((cb) => cb());
+(windowEventListeners.freeze || []).forEach((cb) => cb());
+(windowEventListeners.pause || []).forEach((cb) => cb());
+qaAssert(noties.length === lifecycleNoties, 'pagehide/freeze/pause checkpoints must not show Noty');
+qaAssert(
+  sandbox.window.cw.state.session_play_hash === lifecycleHash,
+  'Eco cleanup on pagehide/freeze/pause must preserve playback context'
+);
+
+// Profile isolation: switching profile must invalidate both storage cache and playback/card session state.
+storage.continue_watch_params__migrated_to_profiles = true;
+const profileTitle = 'QA Profile Isolated Movie';
+const profileHash = Lampa.Utils.hash(profileTitle);
+storage.continue_watch_params_1001 = {
+  [profileHash]: {
+    title: profileTitle,
+    percent: 51,
+    time: 1020,
+    duration: 2000,
+    timestamp: Date.now(),
+    torrent_link: 'magnet:?xt=urn:btih:efefefefefefefefefefefefefefefefefefefef',
+    file_index: 0,
+  },
+};
+storage.continue_watch_params_1002 = {};
+Lampa.Account.Permit.sync = true;
+Lampa.Account.Permit.account.profile.id = 1001;
+Lampa.Listener.send('profile_select');
+const profileAInspect = sandbox.window.cw.inspect(profileTitle);
+qaAssert(
+  profileAInspect.entries.some((entry) => entry.title === profileTitle),
+  'Profile A must see its own Continue entry'
+);
+const profileState = sandbox.window.cw.state;
+profileState.last_player_hash = profileHash;
+profileState.session_play_hash = profileHash;
+profileState.last_full_movie = {title: profileTitle};
+profileState.last_full_render = makeCardRender();
+Lampa.Account.Permit.account.profile.id = 1002;
+Lampa.Listener.send('profile_select');
+const profileBInspect = sandbox.window.cw.inspect(profileTitle);
+qaAssert(
+  !profileBInspect.entries.some((entry) => entry.title === profileTitle),
+  'Profile B must not see Profile A Continue data'
+);
+qaAssert(
+  !profileState.last_player_hash &&
+    !profileState.session_play_hash &&
+    !profileState.last_full_movie &&
+    !profileState.last_full_render,
+  'Profile switch must clear player/session hash and cached full-card render'
+);
 
 if (noties.some((n) => /error|ошиб/i.test(n))) {
   throw new Error('Lampa.Noty error shown: ' + noties.join(' | '));
+}
+
+if (qaFailures.length) {
+  throw new Error('QA regressions (' + qaFailures.length + '):\n- ' + qaFailures.join('\n- '));
 }
 
 console.log('cw smoke OK');
