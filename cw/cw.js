@@ -7,7 +7,7 @@
 (function () {
   'use strict';
 
-  var PLUGIN_VERSION = '162';
+  var PLUGIN_VERSION = '166';
 
   if (window.continue_watch_plugin) return;
   window.continue_watch_plugin = PLUGIN_VERSION;
@@ -23,6 +23,7 @@
   var MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
   var STORAGE_DEBOUNCE_MS = 2000;
   var TIMELINE_THROTTLE_MS = 2000;
+  var PROGRESS_CHECKPOINT_MS = 30000;
   var CLICK_DEBOUNCE_MS = 1000;
   var MENU_RETRY_MAX = 40;
   var MENU_RETRY_MS = 500;
@@ -38,6 +39,13 @@
   var PREFETCH_TARGET_DEF = 20;
   var PREFETCH_POLL_MS = 1500;
   var PREFETCH_TIMEOUT_MS = 120000;
+  // Пока текущий файл набирает буфер, prefetch следующего эпизода закрыт
+  // «гейтом». GATE_POLL_MS — лёгкий опрос статуса торрента (stats в
+  // TorrServer общие на торрент, так что одного запроса хватает).
+  // GATE_MAX_MS — страховка: гейт не может залипнуть навсегда, даже если
+  // TorrServer перестал отдавать прогресс или плеер умер без событий.
+  var PREFETCH_GATE_POLL_MS = 2000;
+  var PREFETCH_GATE_MAX_MS = 90000;
   var ECO_MODE_KEY = 'cw_eco_mode';
 
   var SMART_NEXT_PCT = 92;
@@ -88,6 +96,18 @@
     prefetch_target_reached: false,
     prefetch_poll_iv: 0,
     prefetch_xhr: null,
+    prefetch_request: null,
+    // Монотонный токен активного prefetch'а. Отложенный колбэк getTorrentHash
+    // (POST /torrents add на не-magnet ссылке) может прийти уже после
+    // stopPrefetchPoll / после переключения модалки на текущий файл — без
+    // сверки токена он запускал preload осиротевшего index'а.
+    prefetch_gen: 0,
+    prefetch_deferred: null,
+    prefetch_gate: null,
+    prefetch_gate_poll_iv: 0,
+    prefetch_gate_timer: 0,
+    prefetch_gate_reason: '',
+    prefetch_gate_opened_at: 0,
     last_full_title: null,
     last_full_movie: null,
     last_full_render: null,
@@ -114,7 +134,16 @@
     cleanup_count: 0,
     last_cleanup_at: 0,
     last_cleanup_reason: '',
+    progress_checkpoint_iv: 0,
+    progress_checkpoint_count: 0,
+    last_progress_checkpoint_at: 0,
+    last_progress_checkpoint_reason: '',
     buffer_close: null,
+    buffer_target: null,
+    buffer_preload_xhr: null,
+    playlist_gen: 0,
+    external_playback: false,
+    player_running: false,
     boot_at: 0,
     boot_heap_used: 0,
     timeline_updates: 0,
@@ -126,7 +155,11 @@
   };
 
   var TIMERS = {save: 0, click: 0};
-  var LISTENERS = {player_start: null, player_destroy: null};
+  var LISTENERS = {
+    player_start: null,
+    player_destroy: null,
+    player_external: null,
+  };
 
   // =========================================================================
   // 3. Logger (ленивый — не строит timestamp когда DEBUG=false)
@@ -368,9 +401,13 @@
   function generateHash(movie, season, episode) {
     var title = pickTitle(movie);
     if (movie && movie.number_of_seasons && season && episode) {
-      // Must match Lampa's timeline hash format. Do not add separators here:
-      // native Timeline.update/file_view use the historical concatenation.
-      return Lampa.Utils.hash([season, episode, title].join(''));
+      // Официальный контракт Lampa (timeline hash в full/episodes):
+      // [season, season > 10 ? ':' : '', episode, original_name].
+      // Разделитель обязателен для S11+, иначе мы пишем metadata под своим
+      // hash, а нативный Timeline.update — прогресс под официальным.
+      return Lampa.Utils.hash(
+        [season, season > 10 ? ':' : '', episode, title].join('')
+      );
     }
     return Lampa.Utils.hash(title);
   }
@@ -854,6 +891,10 @@
         return;
       }
       if (left <= 0) {
+        // Владелец запроса не снял флаг (внешний плеер/убитый WebView/зависший
+        // TorrServer). Не оставляем stale pending: иначе следующий smart-next
+        // снова прождёт 3.6s впустую.
+        delete S.files_pending[link];
         done(null);
         return;
       }
@@ -1446,19 +1487,34 @@
           return;
         }
         var tries = 0;
+        // До 5 ретраев с шагом до 5с. Без отмены они переживали уход с
+        // карточки / смену профиля и дописывали эпизоды чужого контекста.
+        var gen = S.playlist_gen;
+        var retry = function () {
+          if (S.playlist_gen !== gen) {
+            log('playlist retries cancelled (runtime teardown)');
+            return;
+          }
+          if (tries++ < 5) {
+            setTimeout(function () {
+              if (S.playlist_gen !== gen) return;
+              fetch();
+            }, tries * 1000);
+          } else done(playlist);
+        };
         var fetch = function () {
           safe('Torserver.files', function () {
             Lampa.Torserver.files(
               torrent.hash,
               function (json) {
+                if (S.playlist_gen !== gen) return;
                 if (json && json.file_stats && json.file_stats.length)
                   processFiles(json.file_stats);
-                else if (tries++ < 5) setTimeout(fetch, tries * 1000);
-                else done(playlist);
+                else retry();
               },
               function () {
-                if (tries++ < 5) setTimeout(fetch, tries * 1000);
-                else done(playlist);
+                if (S.playlist_gen !== gen) return;
+                retry();
               }
             );
           });
@@ -1575,6 +1631,12 @@
     }
   }
 
+  function clearClickDebounce() {
+    if (!TIMERS.click) return;
+    clearTimeout(TIMERS.click);
+    TIMERS.click = 0;
+  }
+
   function prefetchEnabled() {
     return getBoolPref(PREFETCH_KEY, true);
   }
@@ -1584,6 +1646,8 @@
   }
 
   function stopPrefetchPoll() {
+    // Любой отложенный колбэк текущего поколения становится недействительным.
+    S.prefetch_gen++;
     if (S.prefetch_poll_iv) {
       clearInterval(S.prefetch_poll_iv);
       S.prefetch_poll_iv = 0;
@@ -1594,6 +1658,258 @@
       } catch (e) {}
       S.prefetch_xhr = null;
     }
+    // Гейт-вотчер живёт только пока гейт закрыт. Если гейт уже открыт, а
+    // интервал ещё жив — он осиротел, снимаем, чтобы таймеры не текли.
+    if (!S.prefetch_gate) stopPrefetchGateWatch();
+  }
+
+  // =========================================================================
+  // 8.4 Гейт фонового prefetch'а
+  // =========================================================================
+  // TorrServer качает preload per-file и последовательно: два одновременных
+  // preload'а в одном торренте делят между собой те же слоты пиров. Из-за
+  // этого фоновый прогрев СЛЕДУЮЩЕГО эпизода тормозит файл, который юзер
+  // смотрит прямо сейчас (на Android TV это выглядит как «сидов много, а
+  // скорость низкая»). Поэтому на старте плеера гейт закрывается и prefetch
+  // next-эпизода откладывается, пока буфер текущего файла не дойдёт до
+  // bufferThreshold(). После открытия гейта отложенный прогрев не теряется,
+  // а запускается заново (preload per-file, старый XHR был оборван).
+  function samePrefetchFile(a, b) {
+    if (!a || !b || a.torrent_link !== b.torrent_link) return false;
+    var ia = typeof a.file_index === 'number' ? a.file_index : 0;
+    var ib = typeof b.file_index === 'number' ? b.file_index : 0;
+    return ia === ib;
+  }
+
+  // Пока открыто окно буферизации, оно САМО качает preload текущего файла.
+  // Гейт в этот момент ещё не закрыт (плеер не стартовал), поэтому без
+  // отдельной блокировки перерисовка карточки (full:complite → _runInject)
+  // запускала prefetch следующего эпизода параллельно с буфером текущего.
+  // Блокировка снимается сама, когда модалка закрывается — в отличие от
+  // гейта, ей не нужен страховочный таймаут.
+  function bufferPreloadBlocks(params) {
+    if (!S.buffer_close || !S.buffer_target || !params) return false;
+    var idx = typeof params.file_index === 'number' ? params.file_index : 0;
+    if (
+      S.buffer_target.link === params.torrent_link &&
+      S.buffer_target.index === idx
+    )
+      return false;
+    return true;
+  }
+
+  function prefetchGateBlocks(params) {
+    if (bufferPreloadBlocks(params)) return true;
+    var gate = S.prefetch_gate;
+    if (!gate || !params) return false;
+    var idx = typeof params.file_index === 'number' ? params.file_index : 0;
+    // Файл, который смотрит юзер, прогревать можно и нужно всегда.
+    if (gate.link === params.torrent_link && gate.index === idx) return false;
+    return true;
+  }
+
+  // Цель откладываем на гейт, если он есть; иначе (блокировка от buffer-modal)
+  // держим отдельно, чтобы догреть после закрытия окна буферизации.
+  function deferPrefetch(movie, params) {
+    var req = {movie: movie, params: params};
+    if (S.prefetch_gate) S.prefetch_gate.pending = req;
+    else S.prefetch_deferred = req;
+  }
+
+  function resumeDeferredPrefetch(reason) {
+    var pending = S.prefetch_deferred;
+    S.prefetch_deferred = null;
+    if (!pending || !pending.params || !prefetchEnabled()) return;
+    if (prefetchGateBlocks(pending.params)) return;
+    log(
+      'prefetch resume (' +
+        (reason || 'unknown') +
+        ') deferred index=' +
+        (typeof pending.params.file_index === 'number'
+          ? pending.params.file_index
+          : 0)
+    );
+    prefetchTorrent(pending.movie, pending.params, {force: true});
+  }
+
+  function prefetchGateInfo() {
+    var gate = S.prefetch_gate;
+    if (!gate) {
+      return {
+        suspended: false,
+        last_reason: S.prefetch_gate_reason || null,
+        last_open_at: S.prefetch_gate_opened_at || 0,
+      };
+    }
+    var pending = gate.pending && gate.pending.params ? gate.pending.params : null;
+    return {
+      suspended: true,
+      link: gate.link,
+      index: gate.index,
+      since: gate.since,
+      waited_ms: Date.now() - gate.since,
+      pct: gate.pct || 0,
+      threshold: bufferThreshold(),
+      polling: !!S.prefetch_gate_poll_iv,
+      pending_index: pending
+        ? typeof pending.file_index === 'number'
+          ? pending.file_index
+          : 0
+        : null,
+    };
+  }
+
+  function stopPrefetchGateWatch() {
+    if (S.prefetch_gate_poll_iv) {
+      clearInterval(S.prefetch_gate_poll_iv);
+      S.prefetch_gate_poll_iv = 0;
+    }
+    if (S.prefetch_gate_timer) {
+      clearTimeout(S.prefetch_gate_timer);
+      S.prefetch_gate_timer = 0;
+    }
+  }
+
+  // Когда окно буферизации выключено, за текущим файлом никто не следит.
+  // Дёргаем 'get' по хешу торрента (stats в TorrServer общие на торрент,
+  // так что того же ответа достаточно) и останавливаемся сразу, как гейт
+  // открылся или сработала страховка.
+  function startPrefetchGateWatch() {
+    var gate = S.prefetch_gate;
+    if (!gate || !torrUrl()) return;
+
+    var probe = function (hash) {
+      if (S.prefetch_gate !== gate) {
+        stopPrefetchGateWatch();
+        return;
+      }
+      tsRequest('get', {hash: hash}, function (info) {
+        if (S.prefetch_gate !== gate) return;
+        var preBytes = info.preloaded_bytes || info.PreloadedBytes || 0;
+        var preSize = info.preload_size || info.PreloadSize || 0;
+        if (preSize <= 0) {
+          // Прогресс буфера измерить нечем — держать prefetch закрытым
+          // бессмысленно, иначе гейт провисит до страховочного таймаута.
+          openPrefetchGate('нет preload-статистики по текущему файлу');
+          return;
+        }
+        gate.pct = Math.min(100, Math.round((preBytes / preSize) * 100));
+        gate.speed = info.download_speed || info.DownloadSpeed || 0;
+        if (gate.pct >= bufferThreshold()) {
+          openPrefetchGate('буфер текущего файла ' + gate.pct + '%');
+        }
+      });
+    };
+
+    var run = function (hash) {
+      if (S.prefetch_gate !== gate || !hash) return;
+      gate.hash = hash;
+      probe(hash);
+      if (S.prefetch_gate !== gate) return;
+      S.prefetch_gate_poll_iv = setInterval(function () {
+        probe(hash);
+      }, PREFETCH_GATE_POLL_MS);
+    };
+
+    if (gate.hash) {
+      run(gate.hash);
+      return;
+    }
+    getTorrentHash(
+      {link: gate.link},
+      function (torrent) {
+        run(torrent && (torrent.hash || torrent.Hash));
+      },
+      function () {
+        openPrefetchGate('хеш торрента недоступен');
+      }
+    );
+  }
+
+  function closePrefetchGate(params, hash) {
+    if (!params || !params.torrent_link) return;
+    var idx = typeof params.file_index === 'number' ? params.file_index : 0;
+    var prev = S.prefetch_gate;
+    var pending = prev && prev.pending ? prev.pending : null;
+    // Активный prefetch целится в другой файл — именно он и отбирает у
+    // текущего файла пиров. Запоминаем цель, чтобы догреть её потом.
+    if (
+      !pending &&
+      prefetchEnabled() &&
+      S.prefetch_request &&
+      !samePrefetchFile(S.prefetch_request.params, params)
+    ) {
+      pending = S.prefetch_request;
+    }
+    stopPrefetchGateWatch();
+    S.prefetch_gate = {
+      link: params.torrent_link,
+      index: idx,
+      since: Date.now(),
+      hash: hash || (S.prefetch_hash && S.last_prefetched_link === params.torrent_link ? S.prefetch_hash : null),
+      pct: 0,
+      speed: 0,
+      pending: pending,
+    };
+    // Обрываем in-flight preload следующего эпизода: он уже забрал пиры.
+    stopPrefetchPoll();
+    log(
+      'prefetch gate closed: current file index=' +
+        idx +
+        ' buffering, threshold=' +
+        bufferThreshold() +
+        '%' +
+        (pending && pending.params
+          ? ' · deferred index=' +
+            (typeof pending.params.file_index === 'number'
+              ? pending.params.file_index
+              : 0)
+          : '')
+    );
+    S.prefetch_gate_timer = setTimeout(function () {
+      openPrefetchGate('страховочный таймаут гейта');
+    }, PREFETCH_GATE_MAX_MS);
+    startPrefetchGateWatch();
+  }
+
+  function releasePrefetchGate(reason, resume) {
+    stopPrefetchGateWatch();
+    var gate = S.prefetch_gate;
+    if (!gate) {
+      if (resume) resumeDeferredPrefetch(reason);
+      else S.prefetch_deferred = null;
+      return;
+    }
+    S.prefetch_gate = null;
+    S.prefetch_gate_reason = reason || 'unknown';
+    S.prefetch_gate_opened_at = Date.now();
+    log(
+      'prefetch gate open (' +
+        S.prefetch_gate_reason +
+        ') after ' +
+        Math.round((Date.now() - gate.since) / 1000) +
+        'с'
+    );
+    var pending = gate.pending;
+    if (!resume || !pending || !pending.params) return;
+    // preload per-file, и старый XHR был оборван → нужен новый
+    // GET /stream?preload для следующего эпизода, иначе TorrServer
+    // ничего качать не начнёт.
+    log(
+      'prefetch gate: resuming deferred warm-up for index=' +
+        (typeof pending.params.file_index === 'number'
+          ? pending.params.file_index
+          : 0)
+    );
+    prefetchTorrent(pending.movie, pending.params, {force: true});
+  }
+
+  function openPrefetchGate(reason) {
+    releasePrefetchGate(reason, true);
+  }
+
+  function clearPrefetchGate(reason) {
+    releasePrefetchGate(reason, false);
   }
 
   function ecoModeEnabled() {
@@ -1612,7 +1928,15 @@
   }
 
   function cleanupRuntime(reason) {
+    // Гейт снимаем без возобновления: cleanup освобождает ресурсы, а не
+    // догревает следующий эпизод. Заодно гарантирует, что после eco-cleanup
+    // или смены профиля не останется «залипшего» гейта и его таймеров.
+    clearPrefetchGate('runtime cleanup');
     stopPrefetchPoll();
+    // Отложенные ретраи loadEpisodesPlaylist после teardown'а не нужны.
+    S.playlist_gen++;
+    S.prefetch_request = null;
+    S.prefetch_deferred = null;
     S.files = {};
     S.files_pending = {};
     S.last_prefetched_link = null;
@@ -1629,12 +1953,19 @@
       });
       S.buffer_close = null;
     }
+    // close() модалки обрывает свой preload сам, но если модалку уже сняли
+    // из DOM другим путём, XHR мог осиротеть — добиваем по ссылке в S.
+    if (S.buffer_preload_xhr) {
+      safe('buffer.preload.abort.cleanup', function () {
+        S.buffer_preload_xhr.abort();
+      });
+      S.buffer_preload_xhr = null;
+    }
+    S.buffer_target = null;
     S.cleanup_count++;
     S.last_cleanup_at = Date.now();
     S.last_cleanup_reason = reason || 'manual';
     log('runtime cleanup: ' + S.last_cleanup_reason);
-    S.session_play_hash = null;
-    S.session_play_card = null;
   }
 
   function scheduleReturnRefresh(reason) {
@@ -1656,7 +1987,7 @@
     );
     var ok = syncEntryFromFileView(h);
     if (!ok) flushHashFromTimeline(h);
-    flushPendingWrites();
+    flushPendingWrites(true);
     if (ok) {
       var card =
         S.last_player_card || S.session_play_card || S.last_launched_card;
@@ -1687,17 +2018,92 @@
     }
   }
 
+  // Тихий checkpoint активного просмотра. Никаких Noty/toast: функция
+  // только снимает актуальный Timeline/file_view и синхронно проталкивает
+  // отложенную запись в Lampa.Storage.
+  function checkpointActiveProgress(reason) {
+    var h = S.last_player_hash || S.session_play_hash;
+    if (!h) return false;
+
+    var synced = syncEntryFromFileView(h);
+    if (!synced) flushHashFromTimeline(h);
+
+    // file_view от внешнего bridge может запаздывать относительно живого
+    // Timeline. После его синка сверяем оба источника и не даём checkpoint
+    // откатить позицию назад.
+    safe('checkpoint.timeline.reconcile', function () {
+      var tl = Lampa.Timeline && Lampa.Timeline.view && Lampa.Timeline.view(h);
+      if (!tl) return;
+      var current = readParams()[h] || {};
+      var pct = typeof tl.percent === 'number' ? tl.percent : 0;
+      var time = tl.time || 0;
+      var duration = tl.duration || 0;
+      var progressed =
+        time > (current.time || 0) || pct > (current.percent || 0);
+      if (progressed) {
+        updateEntry(h, {percent: pct, time: time, duration: duration});
+      } else if (duration > (current.duration || 0)) {
+        updateEntry(
+          h,
+          {duration: duration},
+          {preserveTimestamp: true}
+        );
+      }
+    });
+    flushPendingWrites(true);
+
+    S.progress_checkpoint_count++;
+    S.last_progress_checkpoint_at = Date.now();
+    S.last_progress_checkpoint_reason = reason || 'manual';
+    log(
+      'progress checkpoint: ' +
+        S.last_progress_checkpoint_reason +
+        ' hash=' +
+        String(h).slice(0, 12) +
+        '…'
+    );
+    return true;
+  }
+
+  function startProgressCheckpoints() {
+    if (S.progress_checkpoint_iv) return;
+    S.progress_checkpoint_iv = setInterval(function () {
+      checkpointActiveProgress('interval');
+    }, PROGRESS_CHECKPOINT_MS);
+  }
+
   function attachLifecycleCleanup() {
     var cleanupIfEco = function (reason) {
       if (ecoModeEnabled()) cleanupRuntime(reason);
     };
+    var checkpointAndCleanup = function (reason) {
+      checkpointActiveProgress(reason);
+      cleanupIfEco(reason);
+    };
+    // ViMu и часть внешних плееров не присылают player:destroy вообще, так
+    // что гейт prefetch'а мог провисеть до страховочного таймаута (90с).
+    // Единственный надёжный признак «внешний плеер закрылся» — возврат
+    // приложения на передний план ПОСЛЕ external-сессии. На Timeline.update
+    // ориентироваться нельзя: он идёт и во время воспроизведения.
+    var releaseGateAfterExternal = function (reason) {
+      if (!S.external_playback || S.player_running) return;
+      S.external_playback = false;
+      openPrefetchGate('возврат из внешнего плеера (' + reason + ')');
+    };
     var onAppBecameActive = function (reason) {
+      releaseGateAfterExternal(reason);
       scheduleResumeFlushes(reason);
       scheduleReturnRefresh(reason);
     };
     safe('lifecycle.cleanup', function () {
       window.addEventListener('pagehide', function () {
-        cleanupIfEco('pagehide');
+        checkpointAndCleanup('pagehide');
+      });
+      window.addEventListener('beforeunload', function () {
+        checkpointActiveProgress('beforeunload');
+      });
+      window.addEventListener('blur', function () {
+        checkpointActiveProgress('window.blur');
       });
       window.addEventListener('focus', function () {
         onAppBecameActive('window.focus');
@@ -1706,8 +2112,19 @@
         onAppBecameActive('pageshow');
       });
       document.addEventListener('visibilitychange', function () {
-        if (!document.hidden) onAppBecameActive('visible');
+        if (document.hidden) checkpointAndCleanup('visibility.hidden');
+        else onAppBecameActive('visible');
       });
+      document.addEventListener('freeze', function () {
+        checkpointAndCleanup('freeze');
+      });
+      document.addEventListener('pause', function () {
+        checkpointAndCleanup('pause');
+      });
+      document.addEventListener('resume', function () {
+        onAppBecameActive('resume');
+      });
+      startProgressCheckpoints();
     });
   }
 
@@ -1811,7 +2228,8 @@
     }
   }
 
-  function prefetchTorrent(movie, params) {
+  function prefetchTorrent(movie, params, opts) {
+    opts = opts || {};
     if (!prefetchEnabled()) return;
     if (!params || !params.torrent_link || !params.file_name) return;
     if (!torrUrl()) return;
@@ -1819,14 +2237,38 @@
     // эпизода в том же торренте index меняется → старый prefetch для нового
     // файла бесполезен. Сравниваем link + index, а не только link.
     var idx = typeof params.file_index === 'number' ? params.file_index : 0;
+    if (prefetchGateBlocks(params)) {
+      // Карточка на Android TV перерисовывается сразу после старта плеера
+      // (и пока открыто окно буферизации), и без блокировки prefetch
+      // следующего эпизода снова отбирал бы пиры у текущего файла.
+      // Цель запоминаем и догреваем после буфера.
+      deferPrefetch(movie, params);
+      var gate = S.prefetch_gate;
+      log(
+        'prefetch skip: ' +
+          (gate
+            ? 'gate closed (current file index=' +
+              gate.index +
+              ' at ' +
+              (gate.pct || 0) +
+              '% < ' +
+              bufferThreshold() +
+              '%)'
+            : 'buffer modal preloads index=' +
+              (S.buffer_target ? S.buffer_target.index : '?')) +
+          ', deferring index=' +
+          idx
+      );
+      return;
+    }
     var sameTarget =
       S.last_prefetched_link === params.torrent_link &&
       S.last_prefetched_index === idx;
-    if (sameTarget && S.prefetch_target_reached) {
+    if (!opts.force && sameTarget && S.prefetch_target_reached) {
       log('prefetch skip: same link+index, target already reached');
       return;
     }
-    if (sameTarget && S.prefetch_poll_iv) {
+    if (!opts.force && sameTarget && S.prefetch_poll_iv) {
       log('prefetch skip: same link+index, polling already in progress');
       return;
     }
@@ -1835,6 +2277,8 @@
     if (!url) return;
 
     stopPrefetchPoll();
+    var gen = ++S.prefetch_gen;
+    S.prefetch_request = {movie: movie, params: params};
     S.last_prefetched_link = params.torrent_link;
     S.last_prefetched_index = idx;
     S.prefetched++;
@@ -1872,8 +2316,27 @@
           log('prefetch: no hash returned');
           return;
         }
-        if (S.last_prefetched_link !== params.torrent_link) {
-          log('prefetch: card changed, abort');
+        // Колбэк может прийти с большой задержкой (не-magnet ссылка идёт
+        // через POST /torrents add). К этому моменту prefetch мог быть
+        // отменён (stopPrefetchPoll), перенацелен на другой файл, или
+        // окно буферизации уже качает текущий файл. Preload осиротевшего
+        // поколения запускать нельзя: он отбирает пиры у текущего файла.
+        if (S.prefetch_gen !== gen) {
+          log('prefetch: stale hash callback (gen), abort');
+          return;
+        }
+        if (
+          S.last_prefetched_link !== params.torrent_link ||
+          S.last_prefetched_index !== idx ||
+          S.prefetch_link !== params.torrent_link ||
+          S.prefetch_index !== idx
+        ) {
+          log('prefetch: target changed, abort');
+          return;
+        }
+        if (prefetchGateBlocks(params)) {
+          log('prefetch: gate/buffer closed before hash arrived, abort');
+          deferPrefetch(movie, params);
           return;
         }
 
@@ -1948,6 +2411,16 @@
     var streamUrl = opts.url;
     var threshold = bufferThreshold();
 
+    // Второй launchPlayer (двойное нажатие «Продолжить», авто-next поверх
+    // открытого окна) не должен оставлять предыдущую модалку жить: её poll
+    // и её preload-XHR продолжали бы качать другой файл того же торрента.
+    if (typeof S.buffer_close === 'function') {
+      safe('buffer.close.previous', function () {
+        S.buffer_close();
+      });
+      S.buffer_close = null;
+    }
+
     var hash = null;
     var pollIv = 0;
     var aborted = false;
@@ -1958,10 +2431,15 @@
         Lampa.Controller.enabled() && Lampa.Controller.enabled().name;
     } catch (e) {}
 
+    var bufferTarget = {
+      link: params.torrent_link,
+      index: typeof params.file_index === 'number' ? params.file_index : 0,
+    };
     var fileLabel = (params.file_name || '').split('/').pop();
     var pollStartedAt = Date.now();
     var zeroStatsPolls = 0;
     var pollErrors = 0;
+    var lastPct = 0;
 
     var modal = $(
       '<div class="cw-buf">' +
@@ -1997,37 +2475,81 @@
     modal.find('.cw-buf__sub').text(opts.title || pickTitle(movie));
     if (fileLabel) modal.find('.cw-buf__file').text(fileLabel);
 
+    // triggerPreload держит GET /stream?preload открытым до abort/timeout.
+    // Без явного abort'а он оставался жить после закрытия модалки: TorrServer
+    // продолжал качать файл, который юзер уже отменил, и делил пиры со
+    // следующим запросом (в т.ч. с prefetch'ем следующего эпизода).
+    var preloadXhr = null;
+
+    function abortPreload(reason) {
+      if (!preloadXhr) return;
+      var x = preloadXhr;
+      preloadXhr = null;
+      if (S.buffer_preload_xhr === x) S.buffer_preload_xhr = null;
+      safe('buffer.preload.abort', function () {
+        x.abort();
+      });
+      log('buffer: preload xhr aborted (' + (reason || 'unknown') + ')');
+    }
+
+    function startPreload(reason) {
+      abortPreload('retrigger: ' + (reason || 'unknown'));
+      preloadXhr = triggerPreload(streamUrl, 60000);
+      S.buffer_preload_xhr = preloadXhr;
+    }
+
     function close() {
       aborted = true;
       if (pollIv) {
         clearInterval(pollIv);
         pollIv = 0;
       }
+      abortPreload('buffer modal closed');
       modal.remove();
       if (S.buffer_close === close) S.buffer_close = null;
+      if (S.buffer_target === bufferTarget) S.buffer_target = null;
       safe('Controller.toggle', function () {
         Lampa.Controller.toggle(prevController || 'content');
       });
     }
 
-    function launchNow() {
+    // buffered=true означает «буфер текущего файла уже готов (или его
+    // прогресс измерить нечем)» — в этом случае prefetch следующего эпизода
+    // душить не надо. Ручной «Запустить сейчас» на недокачанном буфере
+    // передаёт buffered=false, и гейт закрывается.
+    function launchNow(info) {
       if (launched) return;
       launched = true;
       close();
-      opts.onLaunch && opts.onLaunch();
+      opts.onLaunch &&
+        opts.onLaunch({
+          hash: hash,
+          pct: lastPct,
+          buffered: !!(info && info.buffered),
+        });
     }
 
     function cancel() {
       if (launched) return;
       close();
+      // Юзер осознанно закрыл окно буферизации. Анти-дребезг клика (1с) в
+      // этом случае должен быть снят: иначе следующее нажатие «Продолжить»
+      // молча проглатывается, и на Android TV это выглядит как «кнопка
+      // перестала работать после отмены».
+      clearClickDebounce();
       opts.onCancel && opts.onCancel();
     }
 
-    modal.find('.cw-buf__btn--launch').on('hover:enter', launchNow);
+    modal.find('.cw-buf__btn--launch').on('hover:enter', function () {
+      launchNow({buffered: false});
+    });
     modal.find('.cw-buf__btn--cancel').on('hover:enter', cancel);
 
     document.body.appendChild(modal[0]);
     S.buffer_close = close;
+    // Пока окно открыто, preload в этом торренте разрешён только текущему
+    // файлу: фоновый прогрев следующего эпизода делил бы с ним пиры.
+    S.buffer_target = bufferTarget;
 
     safe('Controller.add', function () {
       Lampa.Controller.add('cw_buffer_modal', {
@@ -2076,6 +2598,7 @@
 
       var pct =
         preSize > 0 ? Math.min(100, Math.round((preBytes / preSize) * 100)) : 0;
+      lastPct = pct;
       var eta =
         preSize > preBytes && speed > 0 ? (preSize - preBytes) / speed : 0;
 
@@ -2099,7 +2622,7 @@
       // Минимальная скорость нужна только когда буфер ещё мал — чтобы не стартовать на мёртвом торренте.
       if (preSize > 0 && pct >= threshold) {
         log('auto-launch: buffer ' + pct + '% >= threshold ' + threshold + '%');
-        launchNow();
+        launchNow({buffered: true});
       } else if (
         preSize === 0 &&
         loaded > 5 * 1024 * 1024 &&
@@ -2108,7 +2631,8 @@
         log(
           'auto-launch: no preload_size, loaded=' + loaded + ' speed=' + speed
         );
-        launchNow();
+        // preload_size нет → прогресс буфера мерить нечем, гейт держать не на чем.
+        launchNow({buffered: true});
       } else if (
         preSize > 0 &&
         pct < threshold &&
@@ -2123,7 +2647,7 @@
         zeroStatsPolls++;
         if (zeroStatsPolls === 3) {
           log('buffer: zero stats, retriggering preload for current file');
-          triggerPreload(streamUrl, 60000);
+          startPreload('zero stats');
         }
         if (zeroStatsPolls >= 8 || Date.now() - pollStartedAt > 12000) {
           warn('buffer: no preload stats, keeping modal open');
@@ -2178,7 +2702,7 @@
       // достиг порога именно для этого file_index, не перезапускаем preload:
       // на некоторых TorrServer повторный запрос сбрасывает видимый прогресс
       // в buffer-modal обратно на 0%.
-      if (!readyPrefetch) triggerPreload(streamUrl, 60000);
+      if (!readyPrefetch) startPreload('buffer modal start');
       modal
         .find('.cw-buf__status')
         .text(
@@ -2199,7 +2723,11 @@
         .find('.cw-buf__status')
         .text('используем prefetch (буфер ' + S.prefetch_pct + '%)…');
       if (readyPrefetch) {
-        setTimeout(launchNow, 50);
+        lastPct = S.prefetch_pct;
+        hash = cachedHash;
+        setTimeout(function () {
+          launchNow({buffered: true});
+        }, 50);
         return;
       }
       startPolling(cachedHash);
@@ -2252,7 +2780,7 @@
                   msg +
                   ') — keeping buffer modal open'
               );
-              triggerPreload(streamUrl, 60000);
+              startPreload('add failed');
               modal
                 .find('.cw-buf__status')
                 .text('не удалось проверить буфер: ' + msg.slice(0, 70) + '. Автозапуск остановлен.');
@@ -2593,18 +3121,36 @@
       startPlayback(movie, params, url, timeline, opts);
     };
 
+    // Старт воспроизведения → фоновый прогрев следующего эпизода уходит в
+    // ожидание, пока текущий файл не наберёт буфер (см. гейт в 8.4).
+    var armPrefetchGate = function (info) {
+      info = info || {};
+      if (info.buffered) {
+        openPrefetchGate(
+          'буфер текущего файла готов к старту (' + (info.pct || 0) + '%)'
+        );
+      } else {
+        closePrefetchGate(params, info.hash);
+      }
+    };
+
     if (bufferingEnabled() && params.torrent_link && torrUrl()) {
       showBufferModal({
         movie: movie,
         params: params,
         url: url,
         title: params.episode_title || params.title,
-        onLaunch: go,
+        onLaunch: function (info) {
+          armPrefetchGate(info);
+          go();
+        },
         onCancel: function () {
           log('buffer modal cancelled');
+          openPrefetchGate('окно буферизации закрыто без запуска');
         },
       });
     } else {
+      armPrefetchGate();
       go();
     }
   }
@@ -2828,9 +3374,9 @@
     });
   }
 
-  function flushPendingWrites() {
-    if (!TIMERS.save) return;
-    clearTimeout(TIMERS.save);
+  function flushPendingWrites(force) {
+    if (!TIMERS.save && !force) return;
+    if (TIMERS.save) clearTimeout(TIMERS.save);
     TIMERS.save = 0;
     if (!S.mem) return;
     safe('flushPendingWrites', function () {
@@ -2877,6 +3423,8 @@
       S.last_player_hash = hash;
       S.last_player_card = d.card;
       S.last_player_source = source;
+      S.player_running = true;
+      S.external_playback = false;
 
       var patch = {
         source: source,
@@ -2910,7 +3458,17 @@
       touchEntryTimestamp(hash);
       refreshActiveCardSoon(d.card, 'player start');
     };
+    LISTENERS.player_external = function () {
+      // Воспроизведение уехало во внешний плеер: player:destroy может не
+      // прийти никогда, поэтому гейт откроем на возврате приложения.
+      S.external_playback = true;
+      S.player_running = false;
+      log('player external: gate will reopen on app return');
+    };
     LISTENERS.player_destroy = function () {
+      S.player_running = false;
+      S.external_playback = false;
+      openPrefetchGate('плеер закрыт');
       var h = S.last_player_hash || S.session_play_hash;
       var playedCard =
         S.last_player_card || S.session_play_card || S.last_launched_card;
@@ -2947,6 +3505,7 @@
     safe('Player.listener', function () {
       Lampa.Player.listener.follow('start', LISTENERS.player_start);
       Lampa.Player.listener.follow('destroy', LISTENERS.player_destroy);
+      Lampa.Player.listener.follow('external', LISTENERS.player_external);
     });
   }
 
@@ -3008,8 +3567,13 @@
       safe('unfollow.destroy', function () {
         Lampa.Player.listener.remove('destroy', LISTENERS.player_destroy);
       });
+    if (LISTENERS.player_external)
+      safe('unfollow.external', function () {
+        Lampa.Player.listener.remove('external', LISTENERS.player_external);
+      });
     LISTENERS.player_start = null;
     LISTENERS.player_destroy = null;
+    LISTENERS.player_external = null;
   }
 
   // =========================================================================
@@ -3672,9 +4236,15 @@
     // - иначе current (тот же файл, что показывает кнопка).
     // У nextParams может не быть torrent_link/file_name (stub-запись) —
     // prefetchTorrent сам это обработает (early return), без падения.
-    if (!opts.skipPrefetch) {
+    // Пока открыто окно буферизации, фоновый прогрев не запускаем вообще:
+    // Android TV перерисовывает карточку сразу после клика «Продолжить»,
+    // и второй preload в том же торренте забирал бы пиры у файла, который
+    // юзер ждёт прямо сейчас.
+    if (!opts.skipPrefetch && !S.buffer_close) {
       var prefetchTargetParams = target.nextParams || params;
       prefetchTorrent(movie, prefetchTargetParams);
+    } else if (!opts.skipPrefetch) {
+      log('prefetch skip: buffer modal open');
     }
 
     var percent = 0,
@@ -3813,6 +4383,34 @@
   // =========================================================================
   // 13. Профили / Storage listener / миграция
   // =========================================================================
+  // Профиль B не должен наследовать контекст воспроизведения профиля A:
+  // иначе flushProgressAfterExternalReturn/exit-summary/refresh дописывают
+  // прогресс чужой карточки в хранилище нового профиля.
+  function resetPlaybackContext(reason) {
+    cleanupRuntime(reason || 'playback context reset');
+    S.last_player_hash = null;
+    S.last_player_card = null;
+    S.last_player_source = null;
+    S.session_play_hash = null;
+    S.session_play_card = null;
+    S.session_play_source = null;
+    S.last_launched_card = null;
+    S.last_launched_at = 0;
+    S.last_full_title = null;
+    S.last_full_movie = null;
+    S.last_full_render = null;
+    S.last_button_signature = null;
+    S.last_button_signature_at = 0;
+    S.last_play_url = null;
+    S.last_lookup = null;
+    S.last_card_refresh_at = 0;
+    S.restore_continue_after_menu = false;
+    S.restore_continue_until = 0;
+    S.last_exit_summary_at = 0;
+    S.last_exit_summary_hash = null;
+    S.modal_open = false;
+  }
+
   function attachProfileListener() {
     safe('profile listener', function () {
       Lampa.Listener.follow('profile_select', function () {
@@ -3820,6 +4418,7 @@
         S.title_index = null;
         S.ts_url = null;
         S.files = {};
+        resetPlaybackContext('profile change');
         ensureSync();
         migrateOld();
         log('profile changed');
@@ -4445,6 +5044,29 @@
           ? ' · <span style="color:#fc7">в процессе…</span>'
           : '');
     }
+    var gate = S.prefetch_gate;
+    var gateStatus = gate
+      ? '<br><span style="color:#fc7">приостановлен: качается буфер текущего файла (index=' +
+        gate.index +
+        ', ' +
+        (gate.pct || 0) +
+        '% из ' +
+        bufferThreshold() +
+        '%)' +
+        (gate.pending && gate.pending.params
+          ? ' · отложен прогрев index=' +
+            (typeof gate.pending.params.file_index === 'number'
+              ? gate.pending.params.file_index
+              : 0)
+          : '') +
+        ' · ' +
+        Math.round((Date.now() - gate.since) / 1000) +
+        'с</span>'
+      : S.prefetch_gate_reason
+      ? '<br><span style="opacity:.6">гейт открыт: ' +
+        S.prefetch_gate_reason +
+        '</span>'
+      : '';
     body.append(
       row(
         'Фоновый prefetch',
@@ -4458,7 +5080,8 @@
           S.prefetched +
           '</b>' +
           prefetchStatus +
-          ' · <span style="opacity:.6">cw.prefetch(true|false, %)</span>'
+          ' · <span style="opacity:.6">cw.prefetch(true|false, %)</span>' +
+          gateStatus
       )
     );
 
@@ -4593,9 +5216,20 @@
       holds.push(
         'prefetch poll (' + (PREFETCH_POLL_MS / 1000).toFixed(1) + 'с)'
       );
+    if (S.prefetch_gate_poll_iv)
+      holds.push(
+        'gate poll (' + (PREFETCH_GATE_POLL_MS / 1000).toFixed(1) + 'с)'
+      );
+    if (S.prefetch_xhr) holds.push('prefetch preload xhr');
     if (TIMERS.save) holds.push('storage debounce');
     if (TIMERS.click) holds.push('click debounce');
     if (S.buffer_close) holds.push('buffer modal poll');
+    if (S.buffer_preload_xhr)
+      holds.push(
+        'buffer preload xhr' +
+          (S.buffer_target ? ' (index=' + S.buffer_target.index + ')' : '') +
+          (S.buffer_close ? '' : ' ⚠ orphan')
+      );
     if (S.modal_open) holds.push('confirm modal');
     if (S.active_xhrs > 0) holds.push(S.active_xhrs + ' XHR в полёте');
 
@@ -4959,10 +5593,25 @@
             polling: !!S.prefetch_poll_iv,
             last_index: S.last_prefetched_index,
             speed: S.prefetch_speed,
+            gate: prefetchGateInfo(),
+            preload_xhr: !!S.prefetch_xhr,
+            deferred_index:
+              S.prefetch_deferred && S.prefetch_deferred.params
+                ? typeof S.prefetch_deferred.params.file_index === 'number'
+                  ? S.prefetch_deferred.params.file_index
+                  : 0
+                : null,
           },
           runtime: {
             modal_open: S.modal_open,
             buffer_open: !!S.buffer_close,
+            buffer_index: S.buffer_target ? S.buffer_target.index : null,
+            buffer_preload_xhr: !!S.buffer_preload_xhr,
+            // XHR буфера жив, а модалки уже нет → осиротевший preload.
+            orphan_buffer_preload: !!(
+              S.buffer_preload_xhr && !S.buffer_close
+            ),
+            prefetch_gate: prefetchGateInfo(),
             active_xhrs: S.active_xhrs,
             timeline_updates: S.timeline_updates,
             file_view_changes: S.file_view_changes,
@@ -5093,7 +5742,9 @@
         if (typeof enabled !== 'undefined') {
           Lampa.Storage.set(PREFETCH_KEY, !!enabled);
           if (!enabled) {
+            clearPrefetchGate('prefetch отключён');
             stopPrefetchPoll();
+            S.prefetch_request = null;
             S.last_prefetched_link = null;
           }
         }
@@ -5120,6 +5771,7 @@
           target_reached: S.prefetch_target_reached,
           last_link: S.last_prefetched_link,
           last_index: S.last_prefetched_index,
+          gate: prefetchGateInfo(),
         };
       },
       eco: function (enabled) {
