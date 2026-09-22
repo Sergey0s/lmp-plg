@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.7.0';
+    var PLUGIN_VERSION = '2.8.0';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -22,27 +22,46 @@
         { id: 'tna_impact',     title: 'TNA iMPACT! Wrestling',      short: 'TNA Impact',    queries: ['TNA Impact', 'TNA iMPACT Wrestling', 'Impact Wrestling'], airDay: 4, kind: 'weekly', promotion: 'TNA' }
     ];
 
-    var PPV_KEYWORDS = [
+    // Название организации в заголовке — единственный надёжный признак, что
+    // раздача вообще про рестлинг. Без него «Sacrifice» и «Revolution» тянут
+    // 500+ фильмов с тем же названием.
+    var PROMOTION_KEYWORDS = [
+        'wwe', 'wwf', 'wcw', 'ecw', 'nxt',
+        'world wrestling entertainment',
+        'aew', 'all elite wrestling',
+        'tna', 'impact wrestling',
+        'njpw', 'new japan',
+        'roh', 'ring of honor',
+        'aaa', 'lucha libre', 'cmll', 'gcw', 'mlw', 'stardom',
+        'wrestling', 'рестлинг', 'реслинг'
+    ];
+
+    // Названия, выдуманные самим рестлингом: вне его не встречаются, поэтому
+    // организация рядом не обязательна.
+    var PPV_UNIQUE_KEYWORDS = [
         'wrestlemania', 'royal rumble', 'summerslam', 'survivor series',
-        'money in the bank', 'elimination chamber', 'backlash', 'crown jewel',
-        'bad blood', 'clash at', 'clash in', 'night of champions',
+        'money in the bank', 'elimination chamber', 'crown jewel',
+        'night of champions', 'hell in a cell', 'extreme rules',
+        'king of the ring', 'queen of the ring', 'no way out', 'cyber sunday',
         'saturday night main event', 'saturday night s main event', 'snme',
-        'battleground', 'payback', 'extreme rules', 'hell in a cell', 'tlc',
-        'fastlane', 'no mercy', 'vengeance', 'armageddon', 'judgment day',
-        'cyber sunday', 'no way out', 'king of the ring', 'queen of the ring',
         'bash in berlin', 'clash in italy', 'clash in paris',
-        'evolution', 'worlds collide',
-        'wwe ppv', 'wwe ple',
-        'all in', 'double or nothing', 'all out', 'full gear', 'revolution',
-        'wrestledream', 'worlds end', 'forbidden door', 'dynasty', 'grand slam',
-        'beach break', 'blood and guts', 'aew ppv',
-        'bound for glory', 'hard to kill', 'rebellion', 'slammiversary',
-        'genesis', 'victory road', 'no surrender', 'against all odds',
-        'sacrifice', 'turning point', 'final resolution', 'lockdown',
-        'emergence', 'destination x',
-        'halloween havoc', 'great american bash',
-        'tna ppv',
-        'triplemania', 'lucha libre'
+        'double or nothing', 'full gear', 'wrestledream', 'forbidden door',
+        'blood and guts', 'beach break',
+        'slammiversary', 'bound for glory', 'destination x',
+        'halloween havoc', 'great american bash', 'triplemania',
+        'wwe ppv', 'wwe ple', 'aew ppv', 'tna ppv'
+    ];
+
+    // Обычные слова, которые организация обязана сопровождать.
+    var PPV_AMBIGUOUS_KEYWORDS = [
+        'backlash', 'bad blood', 'clash at', 'clash in',
+        'battleground', 'payback', 'tlc', 'fastlane', 'no mercy',
+        'vengeance', 'armageddon', 'judgment day',
+        'evolution', 'revolution', 'worlds collide', 'worlds end',
+        'all in', 'all out', 'dynasty', 'grand slam',
+        'hard to kill', 'rebellion', 'genesis', 'victory road',
+        'no surrender', 'against all odds', 'sacrifice',
+        'turning point', 'final resolution', 'lockdown', 'emergence'
     ];
 
     // Прямые поисковые запросы для PPV-агрегатора: широкие (WWE, AEW)
@@ -102,6 +121,8 @@
             short: config.short,
             queries: config.queries,
             ppvKeywords: config.keywords,
+            ambiguousKeywords: config.ambiguousKeywords || [],
+            promotionKeywords: config.promotions || [],
             excludeKeywords: config.exclude || [],
             kind: 'ppv',
             promotion: config.promotion,
@@ -112,7 +133,10 @@
     var PPV_AGGREGATE = makeAggregator({
         id: 'ppv_all', title: 'PPV / PLE ивенты', short: 'PPV / PLE', promotion: 'PPV',
         queries: PPV_AGGREGATE_QUERIES,
-        keywords: PPV_KEYWORDS, exclude: PPV_EXCLUDE,
+        keywords: PPV_UNIQUE_KEYWORDS,
+        ambiguousKeywords: PPV_AMBIGUOUS_KEYWORDS,
+        promotions: PROMOTION_KEYWORDS,
+        exclude: PPV_EXCLUDE,
         freshDays: 90
     });
 
@@ -163,21 +187,8 @@
     // компромисс между скоростью и нагрузкой на Jackett/роутер.
     var EVENT_QUERY_CONCURRENCY = 4;
     var JACRED_REQUEST_TIMEOUT_MS = 10000;
-    var WRESTLING_FEED_KEYWORDS = [
-        'wwe', 'aew', 'tna', 'impact wrestling', 'njpw', 'roh', 'ring of honor',
-        'wwf', 'wcw', 'ecw', 'aaa x wwe',
-        'triplemania', 'lucha libre',
-        'all elite wrestling', 'world wrestling entertainment',
-        'professional wrestling', 'wrestling',
-        'рестлинг', 'реслинг',
-        'ufc', 'ultimate fighting championship',
-        'bkfc', 'bare knuckle fighting championship', 'bare knuckle'
-    ];
-    var FEED_KEYWORDS_NORM = null;
-    var FEED_TITLE_MATCH_RE = null;
-
-    // Лента объединяет запросы всех плиток, поэтому здесь остаётся только то,
-    // у чего своей плитки нет и что иначе в ленту не попадёт.
+    // Шоу без своей плитки. Как и у плиток, отбор идёт по собственным
+    // запросам: в заголовке должны быть все слова запроса.
     var FEED_EXTRA_QUERIES = [
         'WWE NXT', 'WWE Main Event', 'WWE PPV', 'AEW PPV', 'TNA PPV',
         'WWE Saturday Night Main Event', 'WWE Worlds Collide',
@@ -186,6 +197,19 @@
         'WCW Nitro', 'WWF WWE',
         'NJPW', 'Ring of Honor'
     ];
+
+    var FEED_EXTRA_SOURCE = {
+        id: 'feed_extra',
+        title: 'Прочие шоу',
+        queries: FEED_EXTRA_QUERIES,
+        kind: 'feed'
+    };
+
+    // Единственный источник правды и для плиток, и для ленты: лента показывает
+    // ровно то, что приняла бы хоть одна плитка. Раньше у ленты был свой
+    // список ключей, он разъехался с плитками — UFC пропадал из ленты, а кино
+    // со словом Sacrifice в неё попадало.
+    var FEED_SOURCES = WEEKLY.concat(AGGREGATE_TILES, [FEED_EXTRA_SOURCE]);
 
     function defaultFilterState(eventKind) {
         if (eventKind === 'weekly') return { freshDays: 60, sortBy: 'date' };
@@ -329,6 +353,20 @@
         return TOKEN_RE_CACHE[token];
     }
 
+    // Ключ должен начинаться на границе слова, иначе «tlc» ловит «atlco», а
+    // «aaa» — любой релиз-групп. \b тут не годится: в JS он не видит кириллицу
+    // («рестлинг» рядом с пробелом границей не считается). Цифру справа
+    // пропускаем ради «WrestleMania41», букву — нет, иначе «Revolutions».
+    function keywordsRegex(list) {
+        var parts = [];
+        for (var i = 0; i < (list || []).length; i++) {
+            var norm = normalizeText(list[i]);
+            if (norm) parts.push(escapeRegExp(norm));
+        }
+        if (!parts.length) return null;
+        return new RegExp('(^| )(?:' + parts.join('|') + ')(?![a-zа-яё])');
+    }
+
     function queryMatchesTitle(tNorm, queryTokens) {
         if (!queryTokens.length) return false;
         for (var i = 0; i < queryTokens.length; i++) {
@@ -467,7 +505,9 @@
     // фоновое обновление подменяет результат когда придёт. Без этого
     // юзер каждый раз смотрит «Загружаю свежие раздачи...» 5-15 секунд
     // пока 24 JacRed-запроса не отработают.
-    var FEED_PERSIST_KEY = 'wrestling_feed_cache_v1';
+    // Ключ версионирован: при смене правил отбора старый кэш надо выбросить,
+    // иначе лента ещё 6 часов показывает то, что новые правила уже не пускают.
+    var FEED_PERSIST_KEY = 'wrestling_feed_cache_v2';
     var FEED_PERSIST_TTL = 15 * 60 * 1000;
     var FEED_PERSIST_TTL_STALE = 6 * 60 * 60 * 1000;
 
@@ -689,26 +729,19 @@
         var set = {};
         var list = [];
         function add(q) { if (q && !set[q]) { set[q] = 1; list.push(q); } }
-        WEEKLY.forEach(function (ev) { ev.queries.forEach(add); });
-        AGGREGATE_TILES.forEach(function (ev) { ev.queries.forEach(add); });
-        FEED_EXTRA_QUERIES.forEach(add);
+        FEED_SOURCES.forEach(function (ev) { ev.queries.forEach(add); });
         FEED_QUERIES = list;
         return list;
     }
 
-    function ensureFeedKeywordsNorm() {
-        if (FEED_KEYWORDS_NORM) return;
-        FEED_KEYWORDS_NORM = WRESTLING_FEED_KEYWORDS.concat(PPV_KEYWORDS).map(normalizeText);
-        var parts = [];
-        for (var fi = 0; fi < FEED_KEYWORDS_NORM.length; fi++) {
-            if (!FEED_KEYWORDS_NORM[fi]) continue;
-            parts.push(escapeRegExp(FEED_KEYWORDS_NORM[fi]));
+    function acceptedByAnySource(tNorm) {
+        for (var i = 0; i < FEED_SOURCES.length; i++) {
+            if (titleMatchesEvent(FEED_SOURCES[i], tNorm)) return true;
         }
-        FEED_TITLE_MATCH_RE = parts.length ? new RegExp(parts.join('|')) : null;
+        return false;
     }
 
     function filterFeedMatches(allResults) {
-        var titleRe = FEED_TITLE_MATCH_RE;
         var nowMs = Date.now();
         var cutoff = nowMs - FEED_DAYS * 24 * 60 * 60 * 1000;
         var futureLimit = nowMs + 24 * 60 * 60 * 1000;
@@ -716,8 +749,7 @@
         var matches = [];
         for (var i = 0; i < allResults.length; i++) {
             var row = allResults[i];
-            var tNorm = titleNorm(row);
-            if (!(titleRe && titleRe.test(tNorm))) continue;
+            if (!acceptedByAnySource(titleNorm(row))) continue;
 
             var d = ensureEffectiveDate(row);
             if (!d) continue;
@@ -901,8 +933,6 @@
         var lastPartialAt = 0;
         var lastPartialCount = 0;
 
-        ensureFeedKeywordsNorm();
-
         runQueryBatch({
             queries: buildFeedQueries(),
             adapters: [JACRED_SEARCH_ADAPTER],
@@ -947,26 +977,44 @@
         if (event.ppvKeywords && event.ppvKeywords.length) {
             event._includeKwNorm = event.ppvKeywords.map(normalizeText);
             event._excludeKwNorm = (event.excludeKeywords || []).map(normalizeText);
-            var escParts = [];
-            for (var ii = 0; ii < event._includeKwNorm.length; ii++) {
-                if (!event._includeKwNorm[ii]) continue;
-                escParts.push(escapeRegExp(event._includeKwNorm[ii]));
-            }
-            event._includeKwRe = escParts.length ? new RegExp(escParts.join('|')) : null;
-        }
-        if (event.matchKeywords && event.matchKeywords.length) {
-            event._matchKwNorm = event.matchKeywords.map(normalizeText);
-            var matchParts = [];
-            for (var mi = 0; mi < event._matchKwNorm.length; mi++) {
-                if (!event._matchKwNorm[mi]) continue;
-                matchParts.push(escapeRegExp(event._matchKwNorm[mi]));
-            }
-            event._matchKwRe = matchParts.length ? new RegExp(matchParts.join('|')) : null;
+            event._includeKwRe = keywordsRegex(event.ppvKeywords);
+            event._ambiguousKwRe = keywordsRegex(event.ambiguousKeywords);
+            event._promotionKwRe = keywordsRegex(event.promotionKeywords);
         }
         if (event.queries && event.queries.length) {
             event._queryTokenSets = event.queries.map(tokenize);
         }
         event._kwPrepared = true;
+    }
+
+    // Единственное правило отбора заголовка. Им пользуются и плитка, и лента,
+    // поэтому плитка не может показывать то, чего нет в ленте, и наоборот.
+    function titleMatchesEvent(event, tNorm) {
+        precomputeEventKeywords(event);
+
+        if (event._includeKwNorm) {
+            var ok = !!(event._includeKwRe && event._includeKwRe.test(tNorm));
+            if (!ok && event._ambiguousKwRe && event._ambiguousKwRe.test(tNorm)) {
+                // «Sacrifice», «Revolution» и прочие обычные слова считаются
+                // PPV только рядом с названием организации.
+                ok = !!(event._promotionKwRe && event._promotionKwRe.test(tNorm));
+            }
+            if (!ok) return false;
+            var excl = event._excludeKwNorm;
+            for (var ke = 0; ke < excl.length; ke++) {
+                if (excl[ke] && tokenRegex(excl[ke]).test(tNorm)) return false;
+            }
+            return true;
+        }
+
+        if (event._queryTokenSets) {
+            for (var s = 0; s < event._queryTokenSets.length; s++) {
+                if (queryMatchesTitle(tNorm, event._queryTokenSets[s])) return true;
+            }
+            return false;
+        }
+
+        return true;
     }
 
     function filterEventResults(results, event, state) {
@@ -976,30 +1024,10 @@
         for (var i = 0; i < results.length; i++) ensureEffectiveDate(results[i]);
 
         var matches;
-        if (event._includeKwNorm) {
-            var inclRe = event._includeKwRe;
-            var excl = event._excludeKwNorm;
+        if (event._includeKwNorm || event._queryTokenSets) {
             matches = [];
             for (var j = 0; j < results.length; j++) {
-                var r = results[j];
-                var t = titleNorm(r);
-                if (!(inclRe && inclRe.test(t))) continue;
-                if (event._matchKwRe && !event._matchKwRe.test(t)) continue;
-                var bad = false;
-                for (var ke = 0; ke < excl.length; ke++) {
-                    if (excl[ke] && tokenRegex(excl[ke]).test(t)) { bad = true; break; }
-                }
-                if (!bad) matches.push(r);
-            }
-        } else if (event._queryTokenSets) {
-            var sets = event._queryTokenSets;
-            matches = [];
-            for (var m = 0; m < results.length; m++) {
-                var rr = results[m];
-                var tn = titleNorm(rr);
-                for (var s = 0; s < sets.length; s++) {
-                    if (queryMatchesTitle(tn, sets[s])) { matches.push(rr); break; }
-                }
+                if (titleMatchesEvent(event, titleNorm(results[j]))) matches.push(results[j]);
             }
         } else {
             matches = results.slice();
@@ -1784,7 +1812,14 @@
             canonicalTorrentKey: canonicalTorrentKey,
             runQueryBatch: runQueryBatch,
             createJacRedAccess: createJacRedAccess,
-            normalizeJacRedItem: normalizeJacRedItem
+            normalizeJacRedItem: normalizeJacRedItem,
+            titleMatchesEvent: titleMatchesEvent,
+            filterFeedMatches: filterFeedMatches,
+            buildFeedQueries: buildFeedQueries,
+            titleNorm: titleNorm,
+            FEED_SOURCES: FEED_SOURCES,
+            PPV_AGGREGATE: PPV_AGGREGATE,
+            UFC_AGGREGATE: UFC_AGGREGATE
         };
         return;
     }
