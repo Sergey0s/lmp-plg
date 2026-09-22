@@ -399,6 +399,70 @@ test('JacRed reports missing config instead of calling HTTP', async function () 
     assert.strictEqual(fake.httpCalls.length, 0);
 });
 
+// --- Единое правило отбора заголовков: плитка и лента ------------------------
+
+var titleMatchesEvent = hooks.titleMatchesEvent;
+var titleNorm = hooks.titleNorm;
+var PPV = hooks.PPV_AGGREGATE;
+var UFC = hooks.UFC_AGGREGATE;
+
+function tileAccepts(event, title) {
+    return titleMatchesEvent(event, titleNorm({ Title: title }));
+}
+
+function feedAccepts(title) {
+    var row = { Title: title, PublishDate: new Date().toISOString() };
+    return hooks.filterFeedMatches([row]).length === 1;
+}
+
+test('PPV keyword that is an ordinary word needs a promotion next to it', function () {
+    assert.ok(!tileAccepts(PPV, 'Жертва обстоятельств / Sacrifice (2025) WEB-DL 1080p'));
+    assert.ok(!tileAccepts(PPV, 'The Matrix Revolutions 2003 2160p BluRay x265'));
+    assert.ok(tileAccepts(PPV, 'TNA Sacrifice 2011 [2011, Рестлинг, HDTVRip]'));
+    assert.ok(tileAccepts(PPV, 'AEW Revolution 2026 [2026, Рестлинг, WEB-DL 1080p]'));
+});
+
+test('PPV name coined by wrestling stands on its own', function () {
+    assert.ok(tileAccepts(PPV, 'WrestleMania 42 Sunday 1080p WEB h264'));
+    assert.ok(tileAccepts(PPV, 'Royal Rumble 2026 1080p WEB-DL'));
+});
+
+test('keyword must start a word, so Revolutions and Evolutionary do not count', function () {
+    assert.ok(!tileAccepts(PPV, 'WWE Revolutionary Documentary 2026 1080p'));
+    assert.ok(tileAccepts(PPV, 'WWE Revolution 2026 1080p'));
+});
+
+test('feed accepts exactly what some tile accepts', function () {
+    assert.ok(feedAccepts('UFC 331 Van vs. Pantoja 2 1080p WEB-DL'), 'UFC tile');
+    assert.ok(feedAccepts('WWE Monday Night Raw 22.09.2026 [2026, Рестлинг, WEB-DL 1080p]'), 'weekly tile');
+    assert.ok(feedAccepts('AEW Rampage 19.09.2026 WEB-DL 1080p'), 'feed-only show');
+    assert.ok(feedAccepts('TNA Sacrifice 2026 1080p WEB-DL'), 'PPV tile');
+});
+
+test('feed rejects the movies that used to flood it', function () {
+    assert.ok(!feedAccepts('Жертва обстоятельств / Sacrifice (2025) WEB-DLRip'));
+    assert.ok(!feedAccepts('The Revolutionaries S01E04 1080p AMZN WEB-DL'));
+    assert.ok(!feedAccepts('Jesus Revolution (2023) BDRip 1080p'));
+});
+
+test('feed and tile never disagree on the same title', function () {
+    var titles = [
+        'TNA Sacrifice 2011 [2011, Рестлинг, HDTVRip]',
+        'UFC 331 1080p ENG',
+        'Sacrifice 2025 2160p WEB-DL DDP5.1 SDR H265-NGP',
+        'WWE Backlash 2026 1080p WEB h264'
+    ];
+    titles.forEach(function (title) {
+        var anyTile = hooks.FEED_SOURCES.some(function (src) { return tileAccepts(src, title); });
+        assert.strictEqual(feedAccepts(title), anyTile, title);
+    });
+});
+
+test('PPV tile still drops weekly shows', function () {
+    assert.ok(!tileAccepts(PPV, 'WWE Monday Night Raw 22.09.2026 Sacrifice match'));
+    assert.ok(!tileAccepts(UFC, 'WWE Revolution 2026 1080p'));
+});
+
 (async function run() {
     var failed = 0;
     for (var i = 0; i < tests.length; i++) {
