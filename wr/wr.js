@@ -8,40 +8,18 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.3.3';
+    var PLUGIN_VERSION = '2.7.0';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
     var PLUGIN_AUTHOR_URL = 'https://' + PLUGIN_AUTHOR_LABEL;
 
-    // Логотипы тайлов рендерятся ~150-180px по высоте — 240px ширины более
-    // чем достаточно. Раньше тянули 960px (200-300KB каждый), что давало
-    // ~2-3MB трафика только на иконки при первом открытии плагина.
-    var IMG_WWE_RAW       = 'https://upload.wikimedia.org/wikipedia/commons/thumb/8/86/WWE_RAW_Logo_2025.svg/960px-WWE_RAW_Logo_2025.svg.png';
-    var IMG_WWE_SMACKDOWN = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c9/WWE_SmackDown_%282024%29_Logo.svg/960px-WWE_SmackDown_%282024%29_Logo.svg.png';
-    var IMG_AEW_DYNAMITE  = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/ce/AEW_Dynamite_logo_%28simplified%29.jpg/960px-AEW_Dynamite_logo_%28simplified%29.jpg';
-    var IMG_AEW_COLLISION = 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/All_Elite_Wrestling_logo_2024.svg/960px-All_Elite_Wrestling_logo_2024.svg.png';
-    var IMG_TNA_IMPACT    = 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/02/TNA_Impact%21_2024.png/960px-TNA_Impact%21_2024.png';
-    var IMG_PPV           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6c/Standard_WrestleMania_logo_from_2019_to_present.png/960px-Standard_WrestleMania_logo_from_2019_to_present.png';
-    var IMG_UFC           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/UFC_Logo.svg/960px-UFC_Logo.svg.png';
-    var IMG_BKFC          = 'https://upload.wikimedia.org/wikipedia/commons/thumb/f/f0/Bkfc-logo.png/960px-Bkfc-logo.png';
-
-    var TMDB = 'https://image.tmdb.org/t/p/w780';
-    var BG_WWE_RAW       = TMDB + '/dzexW1LJMC5w4oqG2XxUTcGMhL5.jpg';
-    var BG_WWE_SMACKDOWN = TMDB + '/2bEaTevFYWY1lLIgsGEIjJddiDw.jpg';
-    var BG_AEW_DYNAMITE  = TMDB + '/qQUMMyY4IbSW4a8c1GvmcBdRDDY.jpg';
-    var BG_AEW_COLLISION = TMDB + '/dQ8CwU7ADTXJ1Qzf7WiTWgtrvkd.jpg';
-    var BG_TNA_IMPACT    = TMDB + '/10dazLg0WJnlirHbgZF7m57iJCu.jpg';
-    var BG_PPV           = TMDB + '/uGbpWb3R73LJj7LlQJ7B8cljYJL.jpg';
-    var BG_UFC           = 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/aa/UFC_74_Respect_Bout.jpg/1280px-UFC_74_Respect_Bout.jpg';
-    var BG_BKFC          = 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/BKFC_UK_Ring.jpg/1280px-BKFC_UK_Ring.jpg';
-
     var WEEKLY = [
-        { id: 'wwe_raw',        title: 'WWE Monday Night Raw',           short: 'WWE Raw',        queries: ['WWE Raw', 'WWE Monday Night Raw'],        airDay: 1, kind: 'weekly', promotion: 'WWE', color: '#E51A22', image: IMG_WWE_RAW,       backdrop: BG_WWE_RAW },
-        { id: 'wwe_smackdown',  title: 'WWE Friday Night SmackDown',     short: 'WWE SmackDown',  queries: ['WWE SmackDown', 'WWE Friday Night SmackDown'], airDay: 5, kind: 'weekly', promotion: 'WWE', color: '#0072CE', image: IMG_WWE_SMACKDOWN, backdrop: BG_WWE_SMACKDOWN },
-        { id: 'aew_dynamite',   title: 'AEW Dynamite',                   short: 'AEW Dynamite',   queries: ['AEW Dynamite', 'All Elite Wrestling Dynamite'], airDay: 3, kind: 'weekly', promotion: 'AEW', color: '#1F1F1F', image: IMG_AEW_DYNAMITE,  backdrop: BG_AEW_DYNAMITE },
-        { id: 'aew_collision',  title: 'AEW Collision',                  short: 'AEW Collision',  queries: ['AEW Collision', 'All Elite Wrestling Collision'], airDay: 6, kind: 'weekly', promotion: 'AEW', color: '#C8102E', image: IMG_AEW_COLLISION, backdrop: BG_AEW_COLLISION },
-        { id: 'tna_impact',     title: 'TNA iMPACT! Wrestling',          short: 'TNA Impact',     queries: ['TNA Impact', 'TNA iMPACT Wrestling', 'Impact Wrestling'], airDay: 4, kind: 'weekly', promotion: 'TNA', color: '#2E2E2E', image: IMG_TNA_IMPACT,    backdrop: BG_TNA_IMPACT }
+        { id: 'wwe_raw',        title: 'WWE Monday Night Raw',       short: 'WWE Raw',       queries: ['WWE Raw', 'WWE Monday Night Raw'], airDay: 1, kind: 'weekly', promotion: 'WWE' },
+        { id: 'wwe_smackdown',  title: 'WWE Friday Night SmackDown', short: 'WWE SmackDown', queries: ['WWE SmackDown', 'WWE Friday Night SmackDown'], airDay: 5, kind: 'weekly', promotion: 'WWE' },
+        { id: 'aew_dynamite',   title: 'AEW Dynamite',               short: 'AEW Dynamite',  queries: ['AEW Dynamite', 'All Elite Wrestling Dynamite'], airDay: 3, kind: 'weekly', promotion: 'AEW' },
+        { id: 'aew_collision',  title: 'AEW Collision',              short: 'AEW Collision', queries: ['AEW Collision', 'All Elite Wrestling Collision'], airDay: 6, kind: 'weekly', promotion: 'AEW' },
+        { id: 'tna_impact',     title: 'TNA iMPACT! Wrestling',      short: 'TNA Impact',    queries: ['TNA Impact', 'TNA iMPACT Wrestling', 'Impact Wrestling'], airDay: 4, kind: 'weekly', promotion: 'TNA' }
     ];
 
     var PPV_KEYWORDS = [
@@ -63,7 +41,8 @@
         'sacrifice', 'turning point', 'final resolution', 'lockdown',
         'emergence', 'destination x',
         'halloween havoc', 'great american bash',
-        'tna ppv'
+        'tna ppv',
+        'triplemania', 'lucha libre'
     ];
 
     // Прямые поисковые запросы для PPV-агрегатора: широкие (WWE, AEW)
@@ -84,7 +63,8 @@
         'Double or Nothing', 'All In', 'Full Gear', 'Revolution',
         'Forbidden Door', 'Dynasty', 'All Out', 'Worlds End', 'WrestleDream',
         'Bound for Glory', 'Hard to Kill', 'Slammiversary',
-        'Sacrifice', 'Turning Point', 'Final Resolution'
+        'Sacrifice', 'Turning Point', 'Final Resolution',
+        'AAA TripleMania', 'Lucha Libre AAA'
     ];
 
     var PPV_EXCLUDE = ['raw', 'smackdown', 'dynamite', 'collision', 'impact', 'nxt', 'main event'];
@@ -92,11 +72,25 @@
     var SEARCH_TILE = {
         id: 'free_search',
         title: 'Свободный поиск',
-        short: '🔍 Поиск',
-        kind: 'search',
-        color: '#1F2937',
-        emoji: '🔍'
+        short: 'Поиск',
+        kind: 'search'
     };
+
+    // JacRed отсекает совпавшие ключи базы по maxreadfile (200) ДО чтения,
+    // поэтому широкий запрос «UFC» возвращает произвольный срез и до свежих
+    // турниров не доходит. Префикс номера сужает выборку до одного десятка
+    // событий и отдаёт его целиком: «UFC 33» → 330-339, «UFC Fight Night 28»
+    // → 280-289. Десяток вычисляем от опорной точки, иначе список протухнет.
+    function numberedEventQueries(prefix, anchorNumber, anchorYear, anchorMonth, perYear) {
+        var now = new Date();
+        var months = (now.getFullYear() - anchorYear) * 12 + (now.getMonth() - anchorMonth);
+        var current = anchorNumber + Math.round(months * perYear / 12);
+        var decade = Math.floor(Math.max(current, 0) / 10);
+        return [prefix + decade, prefix + (decade + 1)];
+    }
+
+    var UFC_NUMBERED_QUERIES = numberedEventQueries('UFC ', 331, 2026, 8, 13)
+        .concat(numberedEventQueries('UFC Fight Night ', 288, 2026, 8, 45));
 
     function makeAggregator(config) {
         /*
@@ -111,10 +105,7 @@
             excludeKeywords: config.exclude || [],
             kind: 'ppv',
             promotion: config.promotion,
-            freshDays: config.freshDays,
-            color: config.color,
-            image: config.image,
-            backdrop: config.backdrop
+            freshDays: config.freshDays
         };
     }
 
@@ -122,50 +113,24 @@
         id: 'ppv_all', title: 'PPV / PLE ивенты', short: 'PPV / PLE', promotion: 'PPV',
         queries: PPV_AGGREGATE_QUERIES,
         keywords: PPV_KEYWORDS, exclude: PPV_EXCLUDE,
-        freshDays: 90, color: '#7C3AED', image: IMG_PPV, backdrop: BG_PPV
+        freshDays: 90
     });
 
     var UFC_AGGREGATE = makeAggregator({
         id: 'ufc_all', title: 'UFC турниры', short: 'UFC', promotion: 'UFC',
-        queries: ['UFC', 'UFC Fight Night', 'UFC on ESPN', 'UFC on ABC'],
+        queries: ['UFC', 'UFC Fight Night', 'UFC on ESPN', 'UFC on ABC'].concat(UFC_NUMBERED_QUERIES),
         keywords: ['ufc', 'ultimate fighting championship'],
-        freshDays: 90, color: '#D20A0A', image: IMG_UFC, backdrop: BG_UFC
+        freshDays: 90
     });
 
     var BKFC_AGGREGATE = makeAggregator({
         id: 'bkfc_all', title: 'BKFC турниры', short: 'BKFC', promotion: 'BKFC',
         queries: ['BKFC', 'Bare Knuckle Fighting Championship', 'Bare Knuckle FC'],
         keywords: ['bkfc', 'bare knuckle fighting championship', 'bare knuckle'],
-        freshDays: 180, color: '#F59E0B', image: IMG_BKFC, backdrop: BG_BKFC
+        freshDays: 180
     });
 
-    var FOOTBALL_WC_2026 = {
-        id: 'football_wc_2026',
-        title: 'Футбол · ЧМ2026',
-        short: 'Футбол ЧМ2026',
-        queries: [
-            'Чемпионат Мира 2026',
-            'FIFA World Cup 2026',
-            'World Cup 2026 футбол'
-        ],
-        ppvKeywords: [
-            'чемпионат мира 2026',
-            'fifa world cup 2026',
-            'world cup 2026'
-        ],
-        matchKeywords: ['футбол', 'football', 'soccer'],
-        excludeKeywords: [
-            'обзор', 'highlights',
-            'пресс конференция', 'press conference',
-            'жеребьевка', 'draw',
-            'хоккей', 'hockey', 'nhl', 'кхл'
-        ],
-        kind: 'football',
-        promotion: 'FIFA',
-        freshDays: 30,
-        color: '#15803D',
-        emoji: '⚽'
-    };
+    var AGGREGATE_TILES = [PPV_AGGREGATE, UFC_AGGREGATE, BKFC_AGGREGATE];
 
     var DAY_NAMES = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
 
@@ -188,10 +153,11 @@
 
     var FEED_DAYS = 14;
     var FEED_LIMIT = 60;
-    // 24 уникальных запроса × concurrency 3 = минимум 8 раундов, каждый
-    // с timeout 20s = в худшем случае 160 секунд. Поднимаем concurrency
-    // и снижаем timeout — слишком медленные JacRed-серверы должны падать
-    // быстрее, а не блокировать UI.
+    // Лента объединяет запросы всех плиток — сейчас это 82 уникальных запроса,
+    // то есть 17 раундов по concurrency 5. Ждать их целиком никто не должен:
+    // первый экран рисуется из персистентного кэша, а результаты дорисовываются
+    // по мере прихода ответов. Timeout держим низким, чтобы медленные
+    // JacRed-серверы падали быстро, а не удерживали раунд.
     var FEED_SEARCH_CONCURRENCY = 5;
     // PPV-агрегатор теперь делает 20+ запросов — concurrency 4 даёт разумный
     // компромисс между скоростью и нагрузкой на Jackett/роутер.
@@ -200,6 +166,7 @@
     var WRESTLING_FEED_KEYWORDS = [
         'wwe', 'aew', 'tna', 'impact wrestling', 'njpw', 'roh', 'ring of honor',
         'wwf', 'wcw', 'ecw', 'aaa x wwe',
+        'triplemania', 'lucha libre',
         'all elite wrestling', 'world wrestling entertainment',
         'professional wrestling', 'wrestling',
         'рестлинг', 'реслинг',
@@ -209,26 +176,20 @@
     var FEED_KEYWORDS_NORM = null;
     var FEED_TITLE_MATCH_RE = null;
 
+    // Лента объединяет запросы всех плиток, поэтому здесь остаётся только то,
+    // у чего своей плитки нет и что иначе в ленту не попадёт.
     var FEED_EXTRA_QUERIES = [
         'WWE NXT', 'WWE Main Event', 'WWE PPV', 'AEW PPV', 'TNA PPV',
         'WWE Saturday Night Main Event', 'WWE Worlds Collide',
-        'WWE Evolution', 'WWE Halloween Havoc', 'WWE Great American Bash',
+        'WWE Halloween Havoc', 'WWE Great American Bash',
         'AEW Rampage', 'ROH Wrestling', 'TNA Xplosion',
         'WCW Nitro', 'WWF WWE',
-        'NJPW', 'Ring of Honor',
-        'UFC', 'UFC Fight Night', 'UFC on ESPN', 'UFC on ABC',
-        'BKFC', 'Bare Knuckle Fighting Championship',
-        // Прямые запросы по крупным PPV — чтобы Jackett нашёл их даже если
-        // они не попали в топ-100 широкого запроса 'WWE PPV'.
-        'Backlash', 'WrestleMania', 'Royal Rumble', 'SummerSlam',
-        'Survivor Series', 'Money in the Bank', 'Elimination Chamber',
-        'Double or Nothing', 'All In', 'Full Gear', 'Forbidden Door'
+        'NJPW', 'Ring of Honor'
     ];
 
     function defaultFilterState(eventKind) {
         if (eventKind === 'weekly') return { freshDays: 60, sortBy: 'date' };
         if (eventKind === 'ppv')    return { freshDays: 90, sortBy: 'date' };
-        if (eventKind === 'football') return { freshDays: 30, sortBy: 'date' };
         if (eventKind === 'custom') return { freshDays: 0,  sortBy: 'date' };
         return { freshDays: 60, sortBy: 'date' };
     }
@@ -478,6 +439,16 @@
         return '';
     }
 
+    function canonicalTorrentKey(row) {
+        row = row || {};
+        var magnet = row.MagnetUri || row.magnet || '';
+        var hash = String(row.hash || magnetToHash(magnet) || '').toLowerCase();
+        if (hash) return 'hash:' + hash;
+        if (magnet) return 'magnet:' + magnet;
+        if (row.Link) return 'link:' + row.Link;
+        return 'title:' + String(row.Title || row.title || '') + '|size:' + String(row.Size || row.size || '');
+    }
+
     function wrLog() {
         if (!window.console || !console.log) return;
         var args = Array.prototype.slice.call(arguments);
@@ -487,8 +458,6 @@
 
     var JACRED_CACHE_TTL = 5 * 60 * 1000;
     var JACRED_CACHE_MAX = 40;
-    var jacRedCache = {};
-    var activeRequests = [];
     var activePlayerLog = null;
     var cleanupCount = 0;
     var lastCleanupReason = '';
@@ -535,30 +504,6 @@
         try { Lampa.Storage.set(FEED_PERSIST_KEY, null); } catch (e) {}
     }
 
-    function removeActiveRequest(network) {
-        for (var i = activeRequests.length - 1; i >= 0; i--) {
-            if (activeRequests[i] === network) activeRequests.splice(i, 1);
-        }
-    }
-
-    function pruneJacRedCache() {
-        var now = Date.now();
-        var keys = Object.keys(jacRedCache);
-        var keep = [];
-        for (var i = 0; i < keys.length; i++) {
-            var item = jacRedCache[keys[i]];
-            if (item && (now - item.ts) < JACRED_CACHE_TTL) keep.push(keys[i]);
-            else delete jacRedCache[keys[i]];
-        }
-        if (keep.length <= JACRED_CACHE_MAX) return;
-        keep.sort(function (a, b) {
-            return (jacRedCache[a].ts || 0) - (jacRedCache[b].ts || 0);
-        });
-        while (keep.length > JACRED_CACHE_MAX) {
-            delete jacRedCache[keep.shift()];
-        }
-    }
-
     function memorySnapshot() {
         var m = (window.performance && performance.memory) ? performance.memory : null;
         if (!m) return null;
@@ -582,97 +527,171 @@
 
     function cleanupRuntime(reason) {
         cleanupPlayerLog();
-        pruneJacRedCache();
-        for (var i = activeRequests.length - 1; i >= 0; i--) {
-            try {
-                if (activeRequests[i] && typeof activeRequests[i].clear === 'function') activeRequests[i].clear();
-            } catch (e) {}
-        }
-        activeRequests = [];
+        jacRedAccess.prune();
+        jacRedAccess.abortActive();
         cleanupCount++;
         lastCleanupReason = reason || 'manual';
-        wrLog('cleanup', lastCleanupReason, 'cache=' + Object.keys(jacRedCache).length, 'mem=', memorySnapshot());
+        wrLog('cleanup', lastCleanupReason, 'cache=' + jacRedAccess.cacheSize(), 'mem=', memorySnapshot());
     }
 
-    function searchJacRedSingle(config, query, callback, errorCallback) {
-        var cacheKey = config.base + '|' + query;
-        var cached = jacRedCache[cacheKey];
-        if (cached && (Date.now() - cached.ts) < JACRED_CACHE_TTL) {
-            return callback(cached.data.slice(), { host: config.host, cached: true });
+    /*
+     * Deep module for one JacRed query.
+     *
+     * Interface: search(query), invalidate(), prune(), abortActive().
+     * Implementation owns config, URL, timeout, cache, HTTP, row mapping
+     * and multi-host merge. Host merge uses the same canonicalTorrentKey
+     * as the query orchestrator.
+     */
+    function createJacRedAccess(deps) {
+        deps = deps || {};
+        var getConfigs = deps.getConfigs;
+        var createRequest = deps.createRequest;
+        var nowFn = deps.now || function () { return Date.now(); };
+        var timeoutMs = typeof deps.timeoutMs === 'number' ? deps.timeoutMs : JACRED_REQUEST_TIMEOUT_MS;
+        var cacheTtl = typeof deps.cacheTtl === 'number' ? deps.cacheTtl : JACRED_CACHE_TTL;
+        var cacheMax = typeof deps.cacheMax === 'number' ? deps.cacheMax : JACRED_CACHE_MAX;
+        var cache = {};
+        var active = [];
+
+        function invalidate() {
+            cache = {};
         }
 
-        var url = config.base + '/api/v1.0/torrents?search=' + encodeURIComponent(query) +
-            '&apikey=' + encodeURIComponent(config.key || 'null');
+        function cacheSize() {
+            return Object.keys(cache).length;
+        }
 
-        var network = new Lampa.Reguest();
-        activeRequests.push(network);
-        network.timeout(JACRED_REQUEST_TIMEOUT_MS);
-        network.silent(url, function (data) {
-            removeActiveRequest(network);
-            if (!Array.isArray(data)) return errorCallback('JacRed(' + config.host + '): ответ не массив');
-            var normalized = data.map(normalizeJacRedItem);
-            jacRedCache[cacheKey] = { data: normalized, ts: Date.now() };
-            pruneJacRedCache();
-            callback(normalized.slice(), { host: config.host, cached: false });
-        }, function (xhr) {
-            removeActiveRequest(network);
-            errorCallback('JacRed(' + config.host + ') недоступен (' + (xhr && xhr.status ? xhr.status : 'нет ответа') + ')');
-        });
-    }
+        function activeCount() {
+            return active.length;
+        }
 
-    function searchJacRed(query, callback, errorCallback) {
-        var configs = getJackettConfigs();
-        if (!configs.length) return errorCallback('jackett_url не задан в Lampa');
-
-        var pending = configs.length;
-        var all = [];
-        var seen = {};
-        var sourceStats = [];
-        var hasSuccess = false;
-        var firstError = null;
-
-        function mergeRows(rows) {
-            for (var i = 0; i < rows.length; i++) {
-                var r = rows[i];
-                var key = r.MagnetUri || r.Link || (r.Title + '|' + (r.Size || ''));
-                if (!seen[key]) {
-                    seen[key] = true;
-                    all.push(r);
-                }
+        function removeActive(network) {
+            for (var i = active.length - 1; i >= 0; i--) {
+                if (active[i] === network) active.splice(i, 1);
             }
         }
 
-        function done() {
-            if (--pending > 0) return;
-            if (!hasSuccess) return errorCallback(firstError || 'JacRed недоступен');
-            callback(all, { sources: sourceStats });
+        function prune() {
+            var now = nowFn();
+            var keys = Object.keys(cache);
+            var keep = [];
+            for (var i = 0; i < keys.length; i++) {
+                var item = cache[keys[i]];
+                if (item && (now - item.ts) < cacheTtl) keep.push(keys[i]);
+                else delete cache[keys[i]];
+            }
+            if (keep.length <= cacheMax) return;
+            keep.sort(function (a, b) {
+                return (cache[a].ts || 0) - (cache[b].ts || 0);
+            });
+            while (keep.length > cacheMax) {
+                delete cache[keep.shift()];
+            }
         }
 
-        for (var i = 0; i < configs.length; i++) {
-            (function (cfg) {
-                searchJacRedSingle(cfg, query, function (rows) {
-                    hasSuccess = true;
-                    sourceStats.push({ host: cfg.host, count: rows.length, ok: true });
-                    mergeRows(rows || []);
-                    done();
-                }, function (err) {
-                    firstError = firstError || err;
-                    sourceStats.push({ host: cfg.host, count: 0, ok: false, error: err });
-                    done();
-                });
-            })(configs[i]);
+        function abortActive() {
+            for (var i = active.length - 1; i >= 0; i--) {
+                try {
+                    if (active[i] && typeof active[i].clear === 'function') active[i].clear();
+                } catch (e) {}
+            }
+            active = [];
         }
+
+        function searchSingle(config, query, callback, errorCallback) {
+            var cacheKey = config.base + '|' + query;
+            var cached = cache[cacheKey];
+            if (cached && (nowFn() - cached.ts) < cacheTtl) {
+                return callback(cached.data.slice(), { host: config.host, cached: true });
+            }
+
+            var url = config.base + '/api/v1.0/torrents?search=' + encodeURIComponent(query) +
+                '&apikey=' + encodeURIComponent(config.key || 'null');
+
+            var network = createRequest();
+            active.push(network);
+            if (typeof network.timeout === 'function') network.timeout(timeoutMs);
+            network.silent(url, function (data) {
+                removeActive(network);
+                if (!Array.isArray(data)) return errorCallback('JacRed(' + config.host + '): ответ не массив');
+                var normalized = data.map(normalizeJacRedItem);
+                cache[cacheKey] = { data: normalized, ts: nowFn() };
+                prune();
+                callback(normalized.slice(), { host: config.host, cached: false });
+            }, function (xhr) {
+                removeActive(network);
+                errorCallback('JacRed(' + config.host + ') недоступен (' + (xhr && xhr.status ? xhr.status : 'нет ответа') + ')');
+            });
+        }
+
+        function search(query, callback, errorCallback) {
+            var configs = getConfigs() || [];
+            if (!configs.length) return errorCallback('jackett_url не задан в Lampa');
+
+            var pending = configs.length;
+            var all = [];
+            var seen = {};
+            var sourceStats = [];
+            var hasSuccess = false;
+            var firstError = null;
+
+            function mergeRows(rows) {
+                for (var i = 0; i < rows.length; i++) {
+                    var r = rows[i];
+                    var key = canonicalTorrentKey(r);
+                    if (!seen[key]) {
+                        seen[key] = true;
+                        all.push(r);
+                    }
+                }
+            }
+
+            function done() {
+                if (--pending > 0) return;
+                if (!hasSuccess) return errorCallback(firstError || 'JacRed недоступен');
+                callback(all, { sources: sourceStats });
+            }
+
+            for (var i = 0; i < configs.length; i++) {
+                (function (cfg) {
+                    searchSingle(cfg, query, function (rows) {
+                        hasSuccess = true;
+                        sourceStats.push({ host: cfg.host, count: rows.length, ok: true });
+                        mergeRows(rows || []);
+                        done();
+                    }, function (err) {
+                        firstError = firstError || err;
+                        sourceStats.push({ host: cfg.host, count: 0, ok: false, error: err });
+                        done();
+                    });
+                })(configs[i]);
+            }
+        }
+
+        return {
+            search: search,
+            invalidate: invalidate,
+            prune: prune,
+            abortActive: abortActive,
+            cacheSize: cacheSize,
+            activeCount: activeCount
+        };
     }
+
+    var jacRedAccess = createJacRedAccess({
+        getConfigs: getJackettConfigs,
+        createRequest: function () { return new Lampa.Reguest(); }
+    });
 
     var FEED_QUERIES = null;
     function buildFeedQueries() {
         if (FEED_QUERIES) return FEED_QUERIES;
         var set = {};
         var list = [];
-        WEEKLY.forEach(function (ev) {
-            ev.queries.forEach(function (q) { if (!set[q]) { set[q] = 1; list.push(q); } });
-        });
-        FEED_EXTRA_QUERIES.forEach(function (q) { if (!set[q]) { set[q] = 1; list.push(q); } });
+        function add(q) { if (q && !set[q]) { set[q] = 1; list.push(q); } }
+        WEEKLY.forEach(function (ev) { ev.queries.forEach(add); });
+        AGGREGATE_TILES.forEach(function (ev) { ev.queries.forEach(add); });
+        FEED_EXTRA_QUERIES.forEach(add);
         FEED_QUERIES = list;
         return list;
     }
@@ -715,97 +734,6 @@
         return matches.slice(0, FEED_LIMIT);
     }
 
-    function loadRecentFeed(callback, opts) {
-        opts = opts || {};
-        var isCancelled = typeof opts.isCancelled === 'function' ? opts.isCancelled : function () { return false; };
-        var concurrency = typeof opts.concurrency === 'number' && opts.concurrency > 0
-            ? opts.concurrency : FEED_SEARCH_CONCURRENCY;
-        // onPartial(matches, meta) — вызывается каждый раз когда приходит ответ
-        // от очередного JacRed-запроса. Позволяет UI отрисовывать «свежие
-        // раздачи» инкрементально, не ждать пока отработают все 24 запроса.
-        var onPartial = typeof opts.onPartial === 'function' ? opts.onPartial : null;
-
-        ensureFeedKeywordsNorm();
-        var queries = buildFeedQueries();
-        var total = queries.length;
-        var allResults = [];
-        var seen = {};
-        var nextIx = 0;
-        var inflight = 0;
-        var finished = 0;
-        var lastPartialAt = 0;
-        var lastPartialCount = 0;
-
-        function mergeResults(results) {
-            if (isCancelled()) return;
-            for (var ri = 0; ri < results.length; ri++) {
-                var r = results[ri];
-                var key = r.MagnetUri || r.Link || r.Title;
-                if (!seen[key]) {
-                    seen[key] = true;
-                    allResults.push(r);
-                }
-            }
-        }
-
-        function tryPartial(isFinal) {
-            if (!onPartial || isCancelled()) return;
-            var now = Date.now();
-            // Throttle: одна перерисовка не чаще раза в 350мс, чтобы не
-            // молотить DOM при быстрой пачке cached-ответов. На финал
-            // throttle снимаем.
-            if (!isFinal && now - lastPartialAt < 350) return;
-            var matches = filterFeedMatches(allResults);
-            if (!isFinal && matches.length === lastPartialCount) return;
-            lastPartialAt = now;
-            lastPartialCount = matches.length;
-            onPartial(matches, {
-                finished: finished,
-                total: total,
-                final: !!isFinal
-            });
-        }
-
-        function applyFinish() {
-            if (isCancelled()) return;
-            var matches = filterFeedMatches(allResults);
-            tryPartial(true);
-            callback(matches);
-        }
-
-        function onQueryDone() {
-            finished++;
-            tryPartial(false);
-            if (finished >= total) applyFinish();
-            else kick();
-        }
-
-        function runOne(q) {
-            searchJacRed(q, function (results) {
-                mergeResults(results || []);
-                inflight--;
-                onQueryDone();
-            }, function () {
-                inflight--;
-                onQueryDone();
-            });
-        }
-
-        function kick() {
-            if (isCancelled()) return;
-            while (inflight < concurrency && nextIx < total) {
-                inflight++;
-                runOne(queries[nextIx++]);
-            }
-        }
-
-        if (!total) {
-            if (!isCancelled()) callback([]);
-            return;
-        }
-        kick();
-    }
-
     function searchLampaParser(query, callback, errorCallback) {
         if (!Lampa.Parser || typeof Lampa.Parser.get !== 'function') {
             return errorCallback('Нет Lampa.Parser');
@@ -817,9 +745,36 @@
         });
     }
 
-    function searchTorrents(event, callback, errorCallback) {
-        var queriesToTry = event.queries.slice();
-        var total = queriesToTry.length;
+    function mergeSourceMeta(sourceMap, meta) {
+        if (!meta || !meta.sources) return;
+        for (var i = 0; i < meta.sources.length; i++) {
+            var source = meta.sources[i];
+            var host = source && source.host ? source.host : 'unknown';
+            if (!sourceMap[host]) sourceMap[host] = { host: host, count: 0, ok: false };
+            sourceMap[host].count += (source && source.count) || 0;
+            sourceMap[host].ok = sourceMap[host].ok || !!(source && source.ok);
+        }
+    }
+
+    /*
+     * Deep module for running a batch of torrent queries.
+     *
+     * Each query tries adapters in order and advances only when the current
+     * adapter fails. A successful empty response does not trigger fallback.
+     * Cancellation is cooperative: no new queries are scheduled, while
+     * already-started requests are left to their adapters.
+     */
+    function runQueryBatch(options, callback, errorCallback) {
+        options = options || {};
+        var queries = (options.queries || []).slice();
+        var adapters = (options.adapters || []).slice();
+        var concurrency = typeof options.concurrency === 'number' && options.concurrency > 0
+            ? Math.floor(options.concurrency) : 1;
+        var isCancelled = typeof options.isCancelled === 'function'
+            ? options.isCancelled : function () { return false; };
+        var onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+        var allowAllFailedAsEmpty = !!options.allowAllFailedAsEmpty;
+        var total = queries.length;
         var allResults = [];
         var seen = {};
         var anySuccess = false;
@@ -828,11 +783,12 @@
         var nextIx = 0;
         var inflight = 0;
         var finished = 0;
+        var failed = 0;
 
         function pushResults(results) {
             for (var pi = 0; pi < results.length; pi++) {
                 var r = results[pi];
-                var key = r.MagnetUri || r.Link || (r.Title + '|' + (r.Size || ''));
+                var key = canonicalTorrentKey(r);
                 if (!seen[key]) {
                     seen[key] = true;
                     allResults.push(r);
@@ -840,63 +796,150 @@
             }
         }
 
-        function mergeMeta(meta) {
-            if (!meta || !meta.sources) return;
-            for (var i = 0; i < meta.sources.length; i++) {
-                var s = meta.sources[i];
-                if (!sourceMap[s.host]) sourceMap[s.host] = { host: s.host, count: 0, ok: false };
-                sourceMap[s.host].count += (s.count || 0);
-                sourceMap[s.host].ok = sourceMap[s.host].ok || !!s.ok;
+        function progress(final) {
+            return {
+                finished: finished,
+                total: total,
+                failed: failed,
+                final: !!final
+            };
+        }
+
+        function sources() {
+            var list = [];
+            for (var host in sourceMap) {
+                if (Object.prototype.hasOwnProperty.call(sourceMap, host)) list.push(sourceMap[host]);
             }
+            return list;
+        }
+
+        function result(final) {
+            return {
+                rows: allResults.slice(),
+                sources: sources(),
+                progress: progress(final)
+            };
         }
 
         function finish() {
-            if (!anySuccess && !allResults.length) {
+            if (isCancelled()) return;
+            if (!anySuccess && !allResults.length && !allowAllFailedAsEmpty) {
                 return errorCallback(firstError || 'Не удалось получить результаты');
             }
-            var sources = [];
-            for (var k in sourceMap) sources.push(sourceMap[k]);
-            callback(allResults, { sources: sources });
+            callback(result(true));
         }
 
-        function onQueryDone() {
+        function onQueryDone(queryFailed) {
+            if (isCancelled()) return;
             finished++;
+            if (queryFailed) failed++;
+            if (onProgress) onProgress(result(finished >= total));
             if (finished >= total) finish();
             else kick();
         }
 
-        function runQuery(q) {
-            searchJacRed(q, function (results, meta) {
+        function runAdapter(q, adapterIx, lastError) {
+            if (isCancelled()) return;
+            if (adapterIx >= adapters.length) {
+                firstError = firstError || lastError;
+                inflight--;
+                onQueryDone(true);
+                return;
+            }
+
+            var adapter = adapters[adapterIx];
+            adapter.search(q, function (results, meta) {
+                if (isCancelled()) return;
                 anySuccess = true;
                 pushResults(results || []);
-                mergeMeta(meta);
+                mergeSourceMeta(sourceMap, meta);
                 inflight--;
-                onQueryDone();
+                onQueryDone(false);
             }, function (err) {
-                searchLampaParser(q, function (results) {
-                    anySuccess = true;
-                    pushResults(results || []);
-                    inflight--;
-                    onQueryDone();
-                }, function (err2) {
-                    firstError = firstError || err2 || err;
-                    inflight--;
-                    onQueryDone();
-                });
+                if (isCancelled()) return;
+                runAdapter(q, adapterIx + 1, err || lastError);
             });
         }
 
+        function runQuery(q) {
+            runAdapter(q, 0, null);
+        }
+
         function kick() {
-            while (inflight < EVENT_QUERY_CONCURRENCY && nextIx < total) {
+            if (isCancelled()) return;
+            while (inflight < concurrency && nextIx < total) {
                 inflight++;
-                runQuery(queriesToTry[nextIx++]);
+                runQuery(queries[nextIx++]);
             }
         }
 
-        if (!total) {
-            return errorCallback('Нет поисковых запросов');
-        }
+        if (!total) return errorCallback('Нет поисковых запросов');
+        if (!adapters.length) return errorCallback('Нет поисковых адаптеров');
         kick();
+    }
+
+    var JACRED_SEARCH_ADAPTER = {
+        id: 'jacred',
+        search: function (query, callback, errorCallback) {
+            jacRedAccess.search(query, callback, errorCallback);
+        }
+    };
+
+    var LAMPA_PARSER_SEARCH_ADAPTER = {
+        id: 'lampa_parser',
+        search: function (query, callback, errorCallback) {
+            searchLampaParser(query, callback, errorCallback);
+        }
+    };
+
+    function loadRecentFeed(callback, opts) {
+        opts = opts || {};
+        var isCancelled = typeof opts.isCancelled === 'function' ? opts.isCancelled : function () { return false; };
+        var concurrency = typeof opts.concurrency === 'number' && opts.concurrency > 0
+            ? opts.concurrency : FEED_SEARCH_CONCURRENCY;
+        var onPartial = typeof opts.onPartial === 'function' ? opts.onPartial : null;
+        var lastPartialAt = 0;
+        var lastPartialCount = 0;
+
+        ensureFeedKeywordsNorm();
+
+        runQueryBatch({
+            queries: buildFeedQueries(),
+            adapters: [JACRED_SEARCH_ADAPTER],
+            concurrency: concurrency,
+            isCancelled: isCancelled,
+            allowAllFailedAsEmpty: true,
+            onProgress: function (batch) {
+                if (!onPartial || isCancelled()) return;
+                var now = Date.now();
+                // UI policy: redraw at most once per 350 ms. The orchestrator
+                // still reports a snapshot after every completed query.
+                if (!batch.progress.final && now - lastPartialAt < 350) return;
+                var matches = filterFeedMatches(batch.rows);
+                if (!batch.progress.final && matches.length === lastPartialCount) return;
+                lastPartialAt = now;
+                lastPartialCount = matches.length;
+                onPartial(matches, batch.progress);
+            }
+        }, function (batch) {
+            if (!isCancelled()) callback(filterFeedMatches(batch.rows));
+        }, function () {
+            // allowAllFailedAsEmpty keeps the historical feed behavior.
+            if (!isCancelled()) callback([]);
+        });
+    }
+
+    function searchTorrents(event, callback, errorCallback) {
+        runQueryBatch({
+            queries: event.queries,
+            adapters: [JACRED_SEARCH_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER],
+            concurrency: EVENT_QUERY_CONCURRENCY
+        }, function (batch) {
+            callback(batch.rows, {
+                sources: batch.sources,
+                progress: batch.progress
+            });
+        }, errorCallback);
     }
 
     function precomputeEventKeywords(event) {
@@ -1058,62 +1101,12 @@
         };
     }
 
-    function ensureScreenBackdropLayer() {
-        var layer = document.getElementById('wrestling-screen-bg');
-        if (layer) return layer;
-        layer = document.createElement('div');
-        layer.id = 'wrestling-screen-bg';
-        document.body.appendChild(layer);
-        return layer;
-    }
-
-    function setScreenBackdrop(url) {
-        var layer = ensureScreenBackdropLayer();
-        if (!url) {
-            layer.style.opacity = '0';
-            return;
-        }
-        var img = new Image();
-        img.onload = function () {
-            layer.style.backgroundImage = 'url(\'' + url + '\')';
-            layer.style.opacity = '1';
-        };
-        img.src = url;
-    }
-
-    function clearScreenBackdrop() {
-        var layer = document.getElementById('wrestling-screen-bg');
-        if (layer) {
-            layer.style.opacity = '0';
-            layer.style.backgroundImage = '';
-        }
-    }
-
     function buildEventCard(event) {
-        var hasImage = !!event.image;
-        var hasEmoji = !hasImage && !!event.emoji;
-
-        var layers = '';
-        if (hasImage) {
-            layers += '<div class="wrestling-weekly__tile-img" style="background-image:url(\'' + event.image + '\')"></div>';
-        } else if (hasEmoji) {
-            layers += '<div class="wrestling-weekly__tile-emoji">' + event.emoji + '</div>';
-        }
-
-        var modifierClass = hasImage ? ' wrestling-weekly__tile--with-img' : (hasEmoji ? ' wrestling-weekly__tile--with-emoji' : '');
-
         var html = $(
-            '<div class="selector wrestling-weekly__tile' + modifierClass + '">' +
-                layers +
+            '<div class="selector wrestling-weekly__tile">' +
                 '<div class="wrestling-weekly__tile-name">' + (event.short || event.title) + '</div>' +
             '</div>'
         );
-
-        html.css({ background: event.color || '#222' });
-
-        if (event.backdrop) {
-            html.on('hover:focus', function () { setScreenBackdrop(event.backdrop); });
-        }
 
         if (event.kind === 'search') {
             html.on('hover:enter', function () { openSearchInput('', openCustomSearch); });
@@ -1158,7 +1151,6 @@
             short: query,
             queries: [query],
             kind: 'custom',
-            color: '#475569',
             freshDays: 0
         };
         Lampa.Activity.push({
@@ -1258,25 +1250,22 @@
         };
 
         this.back = function () { Lampa.Activity.backward(); };
-        this.pause = function () { clearScreenBackdrop(); };
-        this.stop  = function () { clearScreenBackdrop(); };
+        this.pause = function () {};
+        this.stop  = function () {};
 
         this.destroy = function () {
             componentDestroyed = true;
             if (Lampa.Parser && typeof Lampa.Parser.clear === 'function') Lampa.Parser.clear();
-            clearScreenBackdrop();
             scroll.destroy();
             html.remove();
         };
 
-        function trackFocus(el, options) {
-            options = options || {};
+        function trackFocus(el) {
             el.on('hover:focus', function () {
                 lastFocus = el[0];
                 if (scroll && typeof scroll.update === 'function') {
                     try { scroll.update(el, true); } catch (e) {}
                 }
-                if (options.clearBackdrop) clearScreenBackdrop();
             });
         }
 
@@ -1295,7 +1284,6 @@
             buildSection('Еженедельные шоу', WEEKLY);
             buildSection('PPV / PLE и поиск', [PPV_AGGREGATE, SEARCH_TILE]);
             buildSection('Боевые виды спорта', [UFC_AGGREGATE, BKFC_AGGREGATE]);
-            buildSection('Футбол', [FOOTBALL_WC_2026]);
             buildRecentFeedSection();
             appendAuthorCredit();
         }
@@ -1313,18 +1301,17 @@
                     try { window.open(PLUGIN_AUTHOR_URL, '_blank'); } catch (e) {}
                 }
             });
-            trackFocus(credit, { clearBackdrop: true });
+            trackFocus(credit);
             scroll.append(credit);
         }
 
         function buildRecentFeedSection() {
-            var sectionHeader = $('<div class="wrestling-weekly__section">🔥 Свежие раздачи · последние ' + FEED_DAYS + ' дней <span class="wrestling-weekly__section-count"></span></div>');
-            sectionHeader.on('mouseenter mouseover focus', clearScreenBackdrop);
+            var sectionHeader = $('<div class="wrestling-weekly__section">Свежие раздачи · последние ' + FEED_DAYS + ' дней <span class="wrestling-weekly__section-count"></span></div>');
             scroll.append(sectionHeader);
             var feedActions = $('<div class="wrestling-weekly__filters"></div>');
-            var refreshFeedBtn = $('<div class="selector wrestling-weekly__filter-btn">🔄 Обновить ленту</div>');
+            var refreshFeedBtn = $('<div class="selector wrestling-weekly__filter-btn">Обновить ленту</div>');
             feedActions.append(refreshFeedBtn);
-            trackFocus(refreshFeedBtn, { clearBackdrop: true });
+            trackFocus(refreshFeedBtn);
             scroll.append(feedActions);
             var feedContainer = $('<div class="wrestling-weekly__list wrestling-weekly__feed"></div>');
             var feedLoader = $('<div class="wrestling-weekly__loader">Загружаю свежие раздачи...</div>');
@@ -1403,7 +1390,7 @@
                 for (var i = 0; i < results.length; i++) {
                     var row = buildResultRow(results[i], feedEvt);
                     row[0].wrFeedKey = feedResultKey(results[i]);
-                    trackFocus(row, { clearBackdrop: true });
+                    trackFocus(row);
                     frag.appendChild(row[0]);
                 }
                 feedContainer[0].appendChild(frag);
@@ -1413,7 +1400,7 @@
             function runFeedSearch(forceRefresh) {
                 var nonce = ++feedNonce;
                 if (forceRefresh) {
-                    jacRedCache = {};
+                    jacRedAccess.invalidate();
                     clearFeedStorage();
                     if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Лента: кэш очищен, обновляю…');
                 }
@@ -1471,23 +1458,19 @@
                     '<div>Следующий эфир: <b>' + formatDate(nextAir) + '</b></div>';
             } else if (event.kind === 'ppv') {
                 metaHtml += '<div>Агрегатор PPV/PLE для всех промоушенов (WWE, AEW, TNA)</div>';
-            } else if (event.kind === 'football') {
-                metaHtml += '<div>Матчи FIFA World Cup 2026 / Чемпионат Мира 2026. В общую ленту не добавляется.</div>';
             } else if (event.kind === 'custom') {
                 metaHtml += '<div>Свободный поиск · запрос: <b>' + (event.queries && event.queries[0] ? event.queries[0] : '') + '</b></div>';
             }
 
             metaHtml += '</div></div>';
             info.html(metaHtml);
-            info.find('.wrestling-weekly__head').css({ borderLeft: '6px solid ' + (event.color || '#444') });
-
             scroll.append(info);
 
             var filterRow = $('<div class="wrestling-weekly__filters"></div>');
             var daysBtn = $('<div class="selector wrestling-weekly__filter-btn"></div>');
             var sortBtn = $('<div class="selector wrestling-weekly__filter-btn"></div>');
             var queryBtn = null;
-            var refreshBtn = $('<div class="selector wrestling-weekly__filter-btn">🔄 Обновить</div>');
+            var refreshBtn = $('<div class="selector wrestling-weekly__filter-btn">Обновить</div>');
 
             function refreshLabels() {
                 daysBtn.html('<span class="wrestling-weekly__filter-label">Период:</span> ' + labelForDays(state.freshDays));
@@ -1503,10 +1486,10 @@
                 filterRow.append(queryBtn);
             }
 
-            trackFocus(daysBtn, { clearBackdrop: true });
-            trackFocus(sortBtn, { clearBackdrop: true });
-            trackFocus(refreshBtn, { clearBackdrop: true });
-            if (queryBtn) trackFocus(queryBtn, { clearBackdrop: true });
+            trackFocus(daysBtn);
+            trackFocus(sortBtn);
+            trackFocus(refreshBtn);
+            if (queryBtn) trackFocus(queryBtn);
 
             scroll.append(filterRow);
 
@@ -1564,7 +1547,7 @@
                 var limit = Math.min(listToShow.length, RENDER_LIMIT);
                 for (var i = 0; i < limit; i++) {
                     var row = buildResultRow(listToShow[i], event);
-                    trackFocus(row, { clearBackdrop: true });
+                    trackFocus(row);
                     frag.appendChild(row[0]);
                 }
                 listContainer[0].appendChild(frag);
@@ -1613,7 +1596,7 @@
             function runSearch(forceRefresh) {
                 var nonce = ++searchNonce;
                 if (forceRefresh) {
-                    jacRedCache = {};
+                    jacRedAccess.invalidate();
                     if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Кэш очищен, обновляю…');
                 }
                 loader.show();
@@ -1683,11 +1666,6 @@
 
         var menuItem = $(
             '<li class="menu__item selector" data-action="' + PLUGIN_ID + '">' +
-                '<div class="menu__ico">' +
-                    '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
-                        '<path d="M6 3l3 3-3 3-3-3 3-3zm12 0l3 3-3 3-3-3 3-3zM12 9l3 3-3 3-3-3 3-3zm-6 6l3 3-3 3-3-3 3-3zm12 0l3 3-3 3-3-3 3-3z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>' +
-                    '</svg>' +
-                '</div>' +
                 '<div class="menu__text">' + PLUGIN_NAME + ' <span class="wrestling-weekly__menu-ver">v' + PLUGIN_VERSION + '</span></div>' +
             '</li>'
         );
@@ -1701,13 +1679,9 @@
             '.wrestling-weekly{padding:1.5em;padding-bottom:7rem}' +
             '.wrestling-weekly__section{margin:1.2em 0 .8em;font-size:1.4em;font-weight:bold;padding-left:.2em}' +
             '.wrestling-weekly__grid{display:flex;flex-wrap:wrap;gap:1em;margin-bottom:1em}' +
-            '.wrestling-weekly__tile{position:relative;width:18em;height:11em;border-radius:.8em;padding:1em;display:flex;align-items:center;justify-content:center;text-align:center;color:#fff;cursor:pointer;overflow:hidden;transition:transform .15s ease}' +
-            '.wrestling-weekly__tile.focus{outline:.25em solid #fff;transform:scale(1.04);box-shadow:0 6px 24px rgba(0,0,0,.5);z-index:2}' +
-            '.wrestling-weekly__tile-img{position:absolute;left:.8em;right:.8em;top:.8em;height:6.4em;background-color:#fff;border-radius:.5em;background-size:contain;background-position:center;background-repeat:no-repeat;background-origin:content-box;padding:.4em;box-shadow:0 2px 8px rgba(0,0,0,.35);z-index:1}' +
-            '.wrestling-weekly__tile-emoji{position:absolute;top:1.4em;left:50%;transform:translateX(-50%);font-size:3.6em;opacity:.9;pointer-events:none;z-index:1}' +
-            '.wrestling-weekly__tile--with-img .wrestling-weekly__tile-name,' +
-            '.wrestling-weekly__tile--with-emoji .wrestling-weekly__tile-name{position:absolute;left:.6em;right:.6em;bottom:.6em;font-size:1em;text-align:center;text-shadow:0 2px 6px rgba(0,0,0,.7);z-index:2}' +
-            '.wrestling-weekly__tile-name{font-size:1.4em;font-weight:bold;text-shadow:0 2px 6px rgba(0,0,0,.7);line-height:1.2;position:relative;z-index:2}' +
+            '.wrestling-weekly__tile{width:18em;min-height:5em;border-radius:.5em;padding:1em;display:flex;align-items:center;justify-content:center;text-align:center;background:rgba(255,255,255,.06);color:#fff;cursor:pointer}' +
+            '.wrestling-weekly__tile.focus{background:#fff;color:#000}' +
+            '.wrestling-weekly__tile-name{font-size:1.25em;font-weight:bold;line-height:1.2}' +
             '.wrestling-weekly__head{display:flex;gap:1.5em;align-items:center;margin-bottom:1em;padding:1em 1.2em;background:rgba(255,255,255,0.04);border-radius:1em}' +
             '.wrestling-weekly__title{font-size:1.4em;font-weight:bold;margin-bottom:.5em}' +
             '.wrestling-weekly__meta{font-size:1em;line-height:1.6}' +
@@ -1730,9 +1704,7 @@
             '.wrestling-weekly__feed{margin-top:.4em}' +
             '.wrestling-weekly__credit{padding:.75em 1em;font-size:1.05em;opacity:.75;line-height:1.35;border-radius:.5em;background:rgba(255,255,255,.08);border-left:4px solid rgba(139,92,246,.8);box-sizing:border-box;min-height:4.25em;display:flex;align-items:center}' +
             '.wrestling-weekly__credit.wrestling-weekly__footer{margin-top:2em;margin-bottom:6rem;padding-top:1.1em;padding-bottom:1.1em}' +
-            '.wrestling-weekly__credit.focus{opacity:1;background:rgba(255,255,255,.14)}' +
-            '#wrestling-screen-bg{position:fixed;inset:0;background-size:cover;background-position:center;background-repeat:no-repeat;opacity:0;transition:opacity .35s ease,background-image .35s ease;pointer-events:none;z-index:0;filter:blur(2px) saturate(1.05)}' +
-            '#wrestling-screen-bg::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.55) 0%,rgba(0,0,0,.7) 60%,rgba(0,0,0,.85) 100%)}'
+            '.wrestling-weekly__credit.focus{opacity:1;background:rgba(255,255,255,.14)}'
         );
         $('<style>' + css + '</style>').appendTo('head');
     }
@@ -1779,7 +1751,7 @@
             },
             clearFeedCache: function () {
                 clearFeedStorage();
-                jacRedCache = {};
+                jacRedAccess.invalidate();
                 return 'wr feed cache cleared';
             },
             feedCache: function () {
@@ -1795,9 +1767,9 @@
             state: function () {
                 return {
                     version: PLUGIN_VERSION,
-                    cache_keys: Object.keys(jacRedCache).length,
+                    cache_keys: jacRedAccess.cacheSize(),
                     feed_cache: window.wr.feedCache(),
-                    active_requests: activeRequests.length,
+                    active_requests: jacRedAccess.activeCount(),
                     active_player_log: !!activePlayerLog,
                     cleanups: cleanupCount,
                     last_cleanup_reason: lastCleanupReason,
@@ -1805,6 +1777,16 @@
                 };
             }
         };
+    }
+
+    if (window.__WR_TEST__) {
+        window.__WR_TEST_HOOKS__ = {
+            canonicalTorrentKey: canonicalTorrentKey,
+            runQueryBatch: runQueryBatch,
+            createJacRedAccess: createJacRedAccess,
+            normalizeJacRedItem: normalizeJacRedItem
+        };
+        return;
     }
 
     if (window.Lampa && window.Lampa.Component) {
