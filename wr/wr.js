@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.8.6';
+    var PLUGIN_VERSION = '2.8.7';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -800,6 +800,10 @@
             function done() {
                 if (--pending > 0) return;
                 if (!hasSuccess) return errorCallback(firstError || 'JacRed недоступен');
+                // Второй хост, ответивший пустотой, не отменяет отказ первого:
+                // иначе «jacred упал, зеркало вернуло ноль» неотличимо от
+                // «раздач нет», и счётчик отказов врёт в самый нужный момент.
+                if (firstError && !all.length) return errorCallback(firstError);
                 callback(all, { sources: sourceStats });
             }
 
