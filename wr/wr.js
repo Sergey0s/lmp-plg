@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.8.0';
+    var PLUGIN_VERSION = '2.8.2';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -187,6 +187,7 @@
     // компромисс между скоростью и нагрузкой на Jackett/роутер.
     var EVENT_QUERY_CONCURRENCY = 4;
     var JACRED_REQUEST_TIMEOUT_MS = 10000;
+    var FEED_REQUEST_TIMEOUT_MS = 30000;
     // Шоу без своей плитки. Как и у плиток, отбор идёт по собственным
     // запросам: в заголовке должны быть все слова запроса.
     var FEED_EXTRA_QUERIES = [
@@ -495,7 +496,9 @@
     }
 
     var JACRED_CACHE_TTL = 5 * 60 * 1000;
-    var JACRED_CACHE_MAX = 40;
+    // Лента гоняет 82 запроса за проход: кэш меньше этого числа вытесняет сам
+    // себя и не спасает ни одного повторного открытия.
+    var JACRED_CACHE_MAX = 200;
     var activePlayerLog = null;
     var cleanupCount = 0;
     var lastCleanupReason = '';
@@ -638,7 +641,7 @@
             active = [];
         }
 
-        function searchSingle(config, query, callback, errorCallback) {
+        function searchSingle(config, query, callback, errorCallback, requestTimeout) {
             var cacheKey = config.base + '|' + query;
             var cached = cache[cacheKey];
             if (cached && (nowFn() - cached.ts) < cacheTtl) {
@@ -650,7 +653,7 @@
 
             var network = createRequest();
             active.push(network);
-            if (typeof network.timeout === 'function') network.timeout(timeoutMs);
+            if (typeof network.timeout === 'function') network.timeout(requestTimeout || timeoutMs);
             network.silent(url, function (data) {
                 removeActive(network);
                 if (!Array.isArray(data)) return errorCallback('JacRed(' + config.host + '): ответ не массив');
@@ -664,9 +667,11 @@
             });
         }
 
-        function search(query, callback, errorCallback) {
+        function search(query, callback, errorCallback, opts) {
             var configs = getConfigs() || [];
             if (!configs.length) return errorCallback('jackett_url не задан в Lampa');
+
+            var requestTimeout = opts && opts.timeoutMs;
 
             var pending = configs.length;
             var all = [];
@@ -703,7 +708,7 @@
                         firstError = firstError || err;
                         sourceStats.push({ host: cfg.host, count: 0, ok: false, error: err });
                         done();
-                    });
+                    }, requestTimeout);
                 })(configs[i]);
             }
         }
@@ -910,12 +915,21 @@
         kick();
     }
 
-    var JACRED_SEARCH_ADAPTER = {
-        id: 'jacred',
-        search: function (query, callback, errorCallback) {
-            jacRedAccess.search(query, callback, errorCallback);
-        }
-    };
+    // Плитка — интерактивное чтение на 1-3 запроса, ей важно быстро сдаться.
+    // Лента читает 82 запроса подряд, ответы JacRed по 60-300 КБ, и на телевизоре
+    // широкие запросы («WWE Raw», «AEW Collision») не укладываются в плиточные
+    // 10 с. Выживали только самые лёгкие — отсюда «осталось два результата».
+    function makeJacRedAdapter(requestTimeout) {
+        return {
+            id: 'jacred',
+            search: function (query, callback, errorCallback) {
+                jacRedAccess.search(query, callback, errorCallback, { timeoutMs: requestTimeout });
+            }
+        };
+    }
+
+    var JACRED_SEARCH_ADAPTER = makeJacRedAdapter(JACRED_REQUEST_TIMEOUT_MS);
+    var JACRED_FEED_ADAPTER = makeJacRedAdapter(FEED_REQUEST_TIMEOUT_MS);
 
     var LAMPA_PARSER_SEARCH_ADAPTER = {
         id: 'lampa_parser',
@@ -923,6 +937,12 @@
             searchLampaParser(query, callback, errorCallback);
         }
     };
+
+    // Лента — объединение плиток, значит и ходить она обязана туда же.
+    // Пока у ленты был только JacRed, упавший JacRed выносил ленту целиком,
+    // а плитки продолжали жить на фолбэке — рестлинг «пропадал» только в ленте.
+    var TILE_ADAPTERS = [JACRED_SEARCH_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER];
+    var FEED_ADAPTERS = [JACRED_FEED_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER];
 
     function loadRecentFeed(callback, opts) {
         opts = opts || {};
@@ -935,7 +955,7 @@
 
         runQueryBatch({
             queries: buildFeedQueries(),
-            adapters: [JACRED_SEARCH_ADAPTER],
+            adapters: FEED_ADAPTERS,
             concurrency: concurrency,
             isCancelled: isCancelled,
             allowAllFailedAsEmpty: true,
@@ -952,17 +972,17 @@
                 onPartial(matches, batch.progress);
             }
         }, function (batch) {
-            if (!isCancelled()) callback(filterFeedMatches(batch.rows));
+            if (!isCancelled()) callback(filterFeedMatches(batch.rows), batch.progress);
         }, function () {
             // allowAllFailedAsEmpty keeps the historical feed behavior.
-            if (!isCancelled()) callback([]);
+            if (!isCancelled()) callback([], null);
         });
     }
 
     function searchTorrents(event, callback, errorCallback) {
         runQueryBatch({
             queries: event.queries,
-            adapters: [JACRED_SEARCH_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER],
+            adapters: TILE_ADAPTERS,
             concurrency: EVENT_QUERY_CONCURRENCY
         }, function (batch) {
             callback(batch.rows, {
@@ -1400,8 +1420,16 @@
                         setCountLabel('· ищу…');
                         return;
                     }
-                    feedContainer.append($('<div class="empty"><div class="empty__title">За ' + FEED_DAYS + ' дней свежих раздач не нашлось</div></div>'));
-                    setCountLabel('· 0');
+                    // Пустая лента из-за упавших источников и пустая лента без
+                    // свежих раздач — разные поломки, и чинят их по-разному.
+                    var pr = opts.progress;
+                    var allFailed = pr && pr.total && pr.failed >= pr.total;
+                    feedContainer.append($('<div class="empty"><div class="empty__title">' +
+                        (allFailed
+                            ? 'Источники недоступны (' + pr.failed + '/' + pr.total + ' запросов упали)'
+                            : 'За ' + FEED_DAYS + ' дней свежих раздач не нашлось') +
+                        '</div></div>'));
+                    setCountLabel(allFailed ? '· источники недоступны' : '· 0');
                     return;
                 }
 
@@ -1410,6 +1438,10 @@
                     suffix = ' · ищу ' + opts.progress.finished + '/' + opts.progress.total;
                 } else if (opts.stale) {
                     suffix = ' · кэш, обновляю…';
+                } else if (opts.progress && opts.progress.failed) {
+                    // Частично упавшая лента выглядит как просто короткая лента.
+                    // Без этой строки «пропал рестлинг» неотличим от «его нет».
+                    suffix = ' · ' + opts.progress.failed + ' из ' + opts.progress.total + ' запросов не ответили';
                 }
                 setCountLabel('· найдено ' + results.length + suffix);
 
@@ -1447,9 +1479,9 @@
                 }
 
                 // 2) Стримим новые результаты по мере прихода ответов от JacRed.
-                loadRecentFeed(function (results) {
+                loadRecentFeed(function (results, progress) {
                     if (nonce !== feedNonce || componentDestroyed) return;
-                    renderFeed(results);
+                    renderFeed(results, { progress: progress });
                     saveFeedToStorage(results);
                 }, {
                     isCancelled: function () {
@@ -1817,6 +1849,9 @@
             filterFeedMatches: filterFeedMatches,
             buildFeedQueries: buildFeedQueries,
             titleNorm: titleNorm,
+            JACRED_CACHE_MAX: JACRED_CACHE_MAX,
+            TILE_ADAPTERS: TILE_ADAPTERS,
+            FEED_ADAPTERS: FEED_ADAPTERS,
             FEED_SOURCES: FEED_SOURCES,
             PPV_AGGREGATE: PPV_AGGREGATE,
             UFC_AGGREGATE: UFC_AGGREGATE
