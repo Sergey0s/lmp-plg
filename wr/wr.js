@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.8.3';
+    var PLUGIN_VERSION = '2.8.6';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -189,13 +189,19 @@
     // первый экран рисуется из персистентного кэша, а результаты дорисовываются
     // по мере прихода ответов. Timeout держим низким, чтобы медленные
     // JacRed-серверы падали быстро, а не удерживали раунд.
-    var FEED_SEARCH_CONCURRENCY = 5;
+    // Пять параллельных ответов по 250 КБ — это шторм и для роутера, и для
+    // JacRed, который на такое отвечает отказами всему IP. Лента рисуется
+    // по мере поступления, так что меньшая параллельность почти не заметна.
+    var FEED_SEARCH_CONCURRENCY = 3;
     // PPV-агрегатор теперь делает 20+ запросов — concurrency 4 даёт разумный
     // компромисс между скоростью и нагрузкой на Jackett/роутер.
     var EVENT_QUERY_CONCURRENCY = 4;
     var JACRED_REQUEST_TIMEOUT_MS = 10000;
     var FEED_REQUEST_TIMEOUT_MS = 30000;
     var BULK_QUERY_THRESHOLD = 4;
+    var JACRED_MAX_INFLIGHT = 3;
+    var JACRED_FAILURE_LIMIT = 4;
+    var JACRED_COOLDOWN_MS = 60000;
     // Шоу без своей плитки. Как и у плиток, отбор идёт по собственным
     // запросам: в заголовке должны быть все слова запроса.
     var FEED_EXTRA_QUERIES = [
@@ -551,6 +557,29 @@
         } catch (e) {}
     }
 
+    // Провалившийся обход раньше сохранялся как пустая лента, а пустая лента
+    // на следующем входе заставляла обойти всё заново. Получался замкнутый
+    // круг: источник отказывает — мы бьём по нему ещё восемьдесят раз.
+    var FEED_FAIL_KEY = 'wrestling_feed_failed_at';
+    var FEED_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
+
+    function noteFeedFailure() {
+        try { Lampa.Storage.set(FEED_FAIL_KEY, Date.now()); } catch (e) {}
+    }
+
+    function clearFeedFailure() {
+        try { Lampa.Storage.set(FEED_FAIL_KEY, 0); } catch (e) {}
+    }
+
+    function feedRetryBlocked() {
+        try {
+            var at = Lampa.Storage.get(FEED_FAIL_KEY, 0) || 0;
+            return (Date.now() - at) < FEED_RETRY_COOLDOWN_MS;
+        } catch (e) {
+            return false;
+        }
+    }
+
     function clearFeedStorage() {
         try { Lampa.Storage.set(FEED_PERSIST_KEY, null); } catch (e) {}
     }
@@ -601,11 +630,59 @@
         var timeoutMs = typeof deps.timeoutMs === 'number' ? deps.timeoutMs : JACRED_REQUEST_TIMEOUT_MS;
         var cacheTtl = typeof deps.cacheTtl === 'number' ? deps.cacheTtl : JACRED_CACHE_TTL;
         var cacheMax = typeof deps.cacheMax === 'number' ? deps.cacheMax : JACRED_CACHE_MAX;
+        var failureLimit = typeof deps.failureLimit === 'number' ? deps.failureLimit : JACRED_FAILURE_LIMIT;
+        var cooldownMs = typeof deps.cooldownMs === 'number' ? deps.cooldownMs : JACRED_COOLDOWN_MS;
+        var maxInflight = typeof deps.maxInflight === 'number' ? deps.maxInflight : JACRED_MAX_INFLIGHT;
         var cache = {};
         var active = [];
+        var failures = {};
+        var blockedUntil = {};
+        var inflight = 0;
+        var waiting = [];
+
+        // Параллельность раньше ограничивала каждая пачка отдельно, а хост
+        // видит их сумму: лента, открытая плитка и два хоста на каждый запрос
+        // складывались в полтора десятка одновременных соединений. Считать
+        // нагрузку обязан тот, кто её создаёт, — то есть этот модуль.
+        function pump() {
+            while (inflight < maxInflight && waiting.length) {
+                inflight++;
+                waiting.shift()();
+            }
+        }
+
+        function release() {
+            inflight--;
+            pump();
+        }
+
+        function schedule(run) {
+            waiting.push(run);
+            pump();
+        }
 
         function invalidate() {
             cache = {};
+            failures = {};
+            blockedUntil = {};
+        }
+
+        // Обход ленты — это 80 запросов подряд. Когда хост начинает отказывать,
+        // добивать его остатком пачки бессмысленно и вредно: пользователь ждёт
+        // 80 таймаутов, а хост видит шторм и режет нас ещё сильнее. Несколько
+        // отказов подряд — и до конца остывания отвечаем сразу, без HTTP.
+        function noteFailure(host) {
+            failures[host] = (failures[host] || 0) + 1;
+            if (failures[host] >= failureLimit) blockedUntil[host] = nowFn() + cooldownMs;
+        }
+
+        function noteSuccess(host) {
+            failures[host] = 0;
+            delete blockedUntil[host];
+        }
+
+        function isBlocked(host) {
+            return (blockedUntil[host] || 0) > nowFn();
         }
 
         function cacheSize() {
@@ -641,6 +718,8 @@
         }
 
         function abortActive() {
+            waiting = [];
+            inflight = 0;
             for (var i = active.length - 1; i >= 0; i--) {
                 try {
                     if (active[i] && typeof active[i].clear === 'function') active[i].clear();
@@ -656,22 +735,41 @@
                 return callback(cached.data.slice(), { host: config.host, cached: true });
             }
 
+            if (isBlocked(config.host)) {
+                return errorCallback('JacRed(' + config.host + ') отдыхает после серии отказов');
+            }
+
             var url = config.base + '/api/v1.0/torrents?search=' + encodeURIComponent(query) +
                 '&apikey=' + encodeURIComponent(config.key || 'null');
 
-            var network = createRequest();
-            active.push(network);
-            if (typeof network.timeout === 'function') network.timeout(requestTimeout || timeoutMs);
-            network.silent(url, function (data) {
-                removeActive(network);
-                if (!Array.isArray(data)) return errorCallback('JacRed(' + config.host + '): ответ не массив');
-                var normalized = data.map(normalizeJacRedItem);
-                cache[cacheKey] = { data: normalized, ts: nowFn() };
-                prune();
-                callback(normalized.slice(), { host: config.host, cached: false });
-            }, function (xhr) {
-                removeActive(network);
-                errorCallback('JacRed(' + config.host + ') недоступен (' + (xhr && xhr.status ? xhr.status : 'нет ответа') + ')');
+            schedule(function () {
+                // Пока запрос стоял в очереди, хост мог успеть отказать.
+                if (isBlocked(config.host)) {
+                    release();
+                    return errorCallback('JacRed(' + config.host + ') отдыхает после серии отказов');
+                }
+
+                var network = createRequest();
+                active.push(network);
+                if (typeof network.timeout === 'function') network.timeout(requestTimeout || timeoutMs);
+                network.silent(url, function (data) {
+                    removeActive(network);
+                    release();
+                    if (!Array.isArray(data)) {
+                        noteFailure(config.host);
+                        return errorCallback('JacRed(' + config.host + '): ответ не массив');
+                    }
+                    noteSuccess(config.host);
+                    var normalized = data.map(normalizeJacRedItem);
+                    cache[cacheKey] = { data: normalized, ts: nowFn() };
+                    prune();
+                    callback(normalized.slice(), { host: config.host, cached: false });
+                }, function (xhr) {
+                    removeActive(network);
+                    release();
+                    noteFailure(config.host);
+                    errorCallback('JacRed(' + config.host + ') недоступен (' + (xhr && xhr.status ? xhr.status : 'нет ответа') + ')');
+                });
             });
         }
 
@@ -1475,6 +1573,7 @@
                 if (forceRefresh) {
                     jacRedAccess.invalidate();
                     clearFeedStorage();
+                    clearFeedFailure();
                     if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Лента: кэш очищен, обновляю…');
                 }
 
@@ -1491,10 +1590,25 @@
                     setCountLabel('· обновляю…');
                 }
 
+                // Автозапуск на главной не имеет права ломиться в источник,
+                // который только что отказал всем: кнопка «Обновить ленту»
+                // остаётся, а сам вход в плагин больше не стоит обхода.
+                if (!forceRefresh && feedRetryBlocked()) {
+                    if (!cached || !cached.matches.length) {
+                        feedContainer.empty();
+                        feedContainer.append($('<div class="empty"><div class="empty__title">Источники недавно не ответили. Нажмите «Обновить ленту», чтобы попробовать снова</div></div>'));
+                        setCountLabel('· пауза после отказа');
+                    }
+                    return;
+                }
+
                 // 2) Стримим новые результаты по мере прихода ответов от JacRed.
                 loadRecentFeed(function (results, progress) {
                     if (nonce !== feedNonce || componentDestroyed) return;
                     renderFeed(results, { progress: progress });
+                    var allFailed = !progress || (progress.total && progress.failed >= progress.total);
+                    if (allFailed) return noteFeedFailure();
+                    clearFeedFailure();
                     saveFeedToStorage(results);
                 }, {
                     isCancelled: function () {
@@ -1824,6 +1938,7 @@
             },
             clearFeedCache: function () {
                 clearFeedStorage();
+                clearFeedFailure();
                 jacRedAccess.invalidate();
                 return 'wr feed cache cleared';
             },
