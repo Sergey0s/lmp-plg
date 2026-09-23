@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.8.2';
+    var PLUGIN_VERSION = '2.8.3';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -49,6 +49,7 @@
         'blood and guts', 'beach break',
         'slammiversary', 'bound for glory', 'destination x',
         'halloween havoc', 'great american bash', 'triplemania',
+        'wrestlepalooza',
         'wwe ppv', 'wwe ple', 'aew ppv', 'tna ppv'
     ];
 
@@ -64,26 +65,32 @@
         'turning point', 'final resolution', 'lockdown', 'emergence'
     ];
 
-    // Прямые поисковые запросы для PPV-агрегатора: широкие (WWE, AEW)
-    // покрывают популярное, специфические (Backlash, Royal Rumble) ловят
-    // конкретные PPV которые могут не попасть в топ-100 широкого запроса.
-    // Jackett ограничивает результаты per-query (~100), поэтому «WWE Backlash»
-    // найдёт Backlash даже если в «WWE» он не в первой сотне.
+    // Запрос обязан быть ровно настолько же узким, насколько узок предикат.
+    // Неоднозначное название мы всё равно примем только вместе с организацией
+    // в заголовке, поэтому и спрашивать его надо вместе с ней: голый «All Out»
+    // тянет 792 КБ фильмов, «AEW All Out» — 15 КБ и тот же рестлинг.
+    // Уникальные названия («WrestleMania») предикат принимает без организации,
+    // так что их спрашиваем как есть, иначе потеряем раздачи без префикса.
+    // Широких «WWE» / «AEW» здесь нет намеренно: JacRed режет совпавшие ключи
+    // до чтения, срез не связан с датой, и замер дал 308 КБ ради одной свежей
+    // строки и 290 КБ ради нуля — при этом они роняли всю плитку по таймауту.
     var PPV_AGGREGATE_QUERIES = [
-        'WWE', 'AEW', 'TNA Wrestling',
-        // Прямые запросы по названию крупных PPV:
-        'Backlash', 'WrestleMania', 'Royal Rumble', 'SummerSlam',
-        'Survivor Series', 'Money in the Bank', 'Elimination Chamber',
-        'Crown Jewel', 'Bad Blood', 'Night of Champions',
-        'Battleground', 'Payback', 'Extreme Rules', 'Hell in a Cell',
-        'Fastlane', 'No Mercy', 'King of the Ring', 'Queen of the Ring',
-        'Clash in Italy', 'Clash in Paris', 'WWE Evolution',
-        'Worlds Collide', 'Halloween Havoc', 'Great American Bash',
-        'Double or Nothing', 'All In', 'Full Gear', 'Revolution',
-        'Forbidden Door', 'Dynasty', 'All Out', 'Worlds End', 'WrestleDream',
-        'Bound for Glory', 'Hard to Kill', 'Slammiversary',
-        'Sacrifice', 'Turning Point', 'Final Resolution',
-        'AAA TripleMania', 'Lucha Libre AAA'
+        // Уникальные названия — без префикса.
+        'WrestleMania', 'Royal Rumble', 'SummerSlam', 'Survivor Series',
+        'Money in the Bank', 'Elimination Chamber', 'Crown Jewel',
+        'Night of Champions', 'Extreme Rules', 'Hell in a Cell',
+        'King of the Ring', 'Queen of the Ring', 'Wrestlepalooza',
+        'Clash in Italy', 'Clash in Paris', 'Bash in Berlin',
+        'Halloween Havoc', 'Great American Bash', 'Worlds Collide',
+        'Double or Nothing', 'Full Gear', 'Forbidden Door', 'WrestleDream',
+        'Bound for Glory', 'Slammiversary', 'AAA TripleMania',
+        // Неоднозначные — только с организацией.
+        'WWE Backlash', 'WWE Bad Blood', 'WWE Battleground', 'WWE Payback',
+        'WWE Fastlane', 'WWE No Mercy', 'WWE Evolution',
+        'AEW All In', 'AEW All Out', 'AEW Revolution', 'AEW Dynasty',
+        'AEW Worlds End',
+        'TNA Hard to Kill', 'TNA Sacrifice', 'TNA Turning Point',
+        'TNA Final Resolution'
     ];
 
     var PPV_EXCLUDE = ['raw', 'smackdown', 'dynamite', 'collision', 'impact', 'nxt', 'main event'];
@@ -188,6 +195,7 @@
     var EVENT_QUERY_CONCURRENCY = 4;
     var JACRED_REQUEST_TIMEOUT_MS = 10000;
     var FEED_REQUEST_TIMEOUT_MS = 30000;
+    var BULK_QUERY_THRESHOLD = 4;
     // Шоу без своей плитки. Как и у плиток, отбор идёт по собственным
     // запросам: в заголовке должны быть все слова запроса.
     var FEED_EXTRA_QUERIES = [
@@ -980,9 +988,14 @@
     }
 
     function searchTorrents(event, callback, errorCallback) {
+        // Плитка шоу — два запроса, ей важно быстро сдаться. Агрегатор PPV —
+        // это такой же массовый обход, как лента, и жить он должен по её
+        // правилам: иначе десятки запросов дружно падают по короткому
+        // таймауту и плитка рапортует «парсер не отвечает».
+        var bulk = (event.queries || []).length > BULK_QUERY_THRESHOLD;
         runQueryBatch({
             queries: event.queries,
-            adapters: TILE_ADAPTERS,
+            adapters: bulk ? FEED_ADAPTERS : TILE_ADAPTERS,
             concurrency: EVENT_QUERY_CONCURRENCY
         }, function (batch) {
             callback(batch.rows, {
