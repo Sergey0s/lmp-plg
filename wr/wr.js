@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.9.2';
+    var PLUGIN_VERSION = '2.9.4';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -203,6 +203,7 @@
     var JACRED_FAILURE_LIMIT = 4;
     var JACRED_COOLDOWN_MS = 60000;
     var JACRED_THROTTLE_COOLDOWN_MS = 5 * 60 * 1000;
+    var JACRED_THROTTLE_COOLDOWN_MAX_MS = 60 * 60 * 1000;
     var JACRED_MIN_SPACING_MS = 400;
     // Шоу без своей плитки. Как и у плиток, отбор идёт по собственным
     // запросам: в заголовке должны быть все слова запроса.
@@ -760,11 +761,13 @@
         var failureLimit = typeof deps.failureLimit === 'number' ? deps.failureLimit : JACRED_FAILURE_LIMIT;
         var cooldownMs = typeof deps.cooldownMs === 'number' ? deps.cooldownMs : JACRED_COOLDOWN_MS;
         var throttleCooldownMs = typeof deps.throttleCooldownMs === 'number' ? deps.throttleCooldownMs : JACRED_THROTTLE_COOLDOWN_MS;
+        var throttleCooldownMaxMs = typeof deps.throttleCooldownMaxMs === 'number' ? deps.throttleCooldownMaxMs : JACRED_THROTTLE_COOLDOWN_MAX_MS;
         var maxInflight = typeof deps.maxInflight === 'number' ? deps.maxInflight : JACRED_MAX_INFLIGHT;
         var cache = {};
         var active = [];
         var failures = {};
         var blockedUntil = {};
+        var throttleStrikes = {};
         var minSpacingMs = typeof deps.minSpacingMs === 'number' ? deps.minSpacingMs : JACRED_MIN_SPACING_MS;
         var delay = deps.delay || function (ms, fn) { setTimeout(fn, ms); };
         var inflight = 0;
@@ -824,14 +827,32 @@
         function noteFailure(host, status) {
             failures[host] = (failures[host] || 0) + 1;
             // 429 — это прямая просьба хоста подождать, а не случайный сбой.
-            // Ждать четырёх таких подряд бессмысленно: отступаем сразу и надолго.
-            if (status === 429) return (blockedUntil[host] = nowFn() + throttleCooldownMs);
+            // Ждать четырёх таких подряд бессмысленно: отступаем сразу.
+            // Если после паузы снова 429 — значит лимит считается за окно
+            // длиннее нашей паузы, и ждать надо кратно дольше, иначе мы
+            // бесконечно тычем по одному запросу и продлеваем себе наказание.
+            if (status === 429) {
+                var strikes = throttleStrikes[host] = (throttleStrikes[host] || 0) + 1;
+                var wait = Math.min(throttleCooldownMs * Math.pow(2, strikes - 1), throttleCooldownMaxMs);
+                blockedUntil[host] = nowFn() + wait;
+                return;
+            }
             if (failures[host] >= failureLimit) blockedUntil[host] = nowFn() + cooldownMs;
         }
 
         function noteSuccess(host) {
             failures[host] = 0;
+            throttleStrikes[host] = 0;
             delete blockedUntil[host];
+        }
+
+        function cooldowns() {
+            var out = [];
+            for (var host in blockedUntil) {
+                if (!Object.prototype.hasOwnProperty.call(blockedUntil, host)) continue;
+                if (blockedUntil[host] > nowFn()) out.push({ host: host, until: blockedUntil[host] });
+            }
+            return out;
         }
 
         function isBlocked(host) {
@@ -1000,6 +1021,7 @@
             prune: prune,
             abortActive: abortActive,
             throttled: throttled,
+            cooldowns: cooldowns,
             cacheSize: cacheSize,
             activeCount: activeCount
         };
@@ -1020,7 +1042,10 @@
     var FEED_CORE_EXTRA_QUERIES = [
         'WWE NXT', 'WWE Main Event', 'AEW Rampage', 'ROH Wrestling', 'TNA Xplosion'
     ];
-    var FEED_TAIL_PER_PASS = 10;
+    // До объединения правил лента обходилась 24 запросами и лимитов не ловила.
+    // Держимся этого порядка: ядро 23 плюс небольшой срез хвоста. Полный круг
+    // по именам PPV занимает больше проходов, но окно ленты — 14 дней.
+    var FEED_TAIL_PER_PASS = 4;
     var FEED_ROTATION_KEY = 'wrestling_feed_rotation';
 
     function dedupe(list) {
@@ -2217,6 +2242,15 @@
         lines.push('Источники: ' + (configs.length
             ? configs.map(function (c) { return c.base + (c.key ? ' (с ключом)' : ' (без ключа)'); }).join(', ')
             : 'не заданы'));
+
+        var cooling = jacRedAccess.cooldowns();
+        if (cooling.length) {
+            cooling.forEach(function (c) {
+                var left = Math.max(0, Math.round((c.until - Date.now()) / 1000));
+                lines.push('ПАУЗА: ' + c.host + ' до ' + clockOf(c.until) +
+                    ' (осталось ' + Math.floor(left / 60) + ' мин ' + (left % 60) + ' с)');
+            });
+        }
 
         if (!s.total) {
             lines.push('Журнал пуст — откройте плитку или обновите ленту.');
