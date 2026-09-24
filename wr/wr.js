@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.8.7';
+    var PLUGIN_VERSION = '2.9.0';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -390,10 +390,20 @@
         return true;
     }
 
+    // Схему по умолчанию берём https: Lampa на телевизоре открыта по https,
+    // и http-запрос из неё движок режет как смешанный контент — при том что
+    // тот же адрес прекрасно отвечает curl'у с ноутбука. Локальный Jackett по
+    // IP или имени в домашней сети https обычно не умеет, ему оставляем http.
+    function defaultScheme(host) {
+        if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host)) return 'http://';
+        if (/(^|\.)local(:\d+)?$/.test(host) || host.indexOf('.') === -1) return 'http://';
+        return 'https://';
+    }
+
     function normalizeJackettUrl(raw) {
         var url = String(raw || '').trim().replace(/\/+$/, '');
         if (!url) return '';
-        if (!/^https?:\/\//i.test(url)) url = 'http://' + url;
+        if (!/^https?:\/\//i.test(url)) url = defaultScheme(url.toLowerCase()) + url;
         return url.replace('jacred.xyz', 'jac.red');
     }
 
@@ -622,6 +632,109 @@
      * and multi-host merge. Host merge uses the same canonicalTorrentKey
      * as the query orchestrator.
      */
+    // --- Журнал запросов -------------------------------------------------
+    // Пишем адрес, схему, запрос и исход. Ключ парсера сюда не попадает
+    // никогда: журнал уходит наружу фотографией, а ключ — секрет.
+    var REQUEST_LOG_KEY = 'wrestling_request_log';
+    var REQUEST_LOG_MAX = 300;
+    var REQUEST_LOG_FLUSH_EVERY = 20;
+
+    function createRequestLog(deps) {
+        deps = deps || {};
+        var nowFn = deps.now || function () { return Date.now(); };
+        var max = typeof deps.max === 'number' ? deps.max : REQUEST_LOG_MAX;
+        var flushEvery = typeof deps.flushEvery === 'number' ? deps.flushEvery : REQUEST_LOG_FLUSH_EVERY;
+        var readStore = deps.read || function () { return null; };
+        var writeStore = deps.write || function () {};
+        var rows = [];
+        var sinceFlush = 0;
+
+        var saved = readStore();
+        if (saved && Array.isArray(saved.rows)) rows = saved.rows.slice(-max);
+
+        function flush() {
+            sinceFlush = 0;
+            writeStore({ version: PLUGIN_VERSION, rows: rows });
+        }
+
+        function record(entry) {
+            rows.push(entry);
+            if (rows.length > max) rows.splice(0, rows.length - max);
+            if (++sinceFlush >= flushEvery) flush();
+            return entry;
+        }
+
+        // Возвращаем «закрывашку»: длительность меряем здесь, а не на месте
+        // вызова, иначе каждый вызывающий будет считать её по-своему.
+        function start(src, host, scheme, query) {
+            var at = nowFn();
+            return function (outcome, extra) {
+                extra = extra || {};
+                record({
+                    t: at, src: src, host: host, scheme: scheme, q: query,
+                    out: outcome, ms: nowFn() - at,
+                    n: extra.rows || 0, st: String(extra.status || '')
+                });
+            };
+        }
+
+        function summary() {
+            var byOutcome = {};
+            var byHost = {};
+            var errors = {};
+            var slowest = null;
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i];
+                byOutcome[r.out] = (byOutcome[r.out] || 0) + 1;
+                var key = r.scheme + r.host;
+                var h = byHost[key] || (byHost[key] = { host: key, ok: 0, fail: 0, other: 0, maxMs: 0 });
+                if (r.out === 'ok') h.ok++;
+                else if (r.out === 'fail') h.fail++;
+                else h.other++;
+                if (r.ms > h.maxMs) h.maxMs = r.ms;
+                if (r.out === 'fail' && r.st) errors[r.st] = (errors[r.st] || 0) + 1;
+                if (!slowest || r.ms > slowest.ms) slowest = r;
+            }
+            var hosts = [];
+            for (var k in byHost) if (Object.prototype.hasOwnProperty.call(byHost, k)) hosts.push(byHost[k]);
+            var errList = [];
+            for (var e in errors) if (Object.prototype.hasOwnProperty.call(errors, e)) errList.push({ text: e, count: errors[e] });
+            errList.sort(function (a, b) { return b.count - a.count; });
+            return {
+                total: rows.length,
+                from: rows.length ? rows[0].t : 0,
+                to: rows.length ? rows[rows.length - 1].t : 0,
+                outcomes: byOutcome,
+                hosts: hosts,
+                errors: errList.slice(0, 5),
+                slowest: slowest
+            };
+        }
+
+        function clear() {
+            rows = [];
+            flush();
+        }
+
+        return {
+            start: start,
+            record: record,
+            entries: function () { return rows.slice(); },
+            summary: summary,
+            flush: flush,
+            clear: clear
+        };
+    }
+
+    var requestLog = createRequestLog({
+        read: function () {
+            try { return Lampa.Storage.get(REQUEST_LOG_KEY, null); } catch (e) { return null; }
+        },
+        write: function (payload) {
+            try { Lampa.Storage.set(REQUEST_LOG_KEY, payload); } catch (e) {}
+        }
+    });
+
     function createJacRedAccess(deps) {
         deps = deps || {};
         var getConfigs = deps.getConfigs;
@@ -639,6 +752,7 @@
         var blockedUntil = {};
         var inflight = 0;
         var waiting = [];
+        var log = deps.log || { start: function () { return function () {}; } };
 
         // Параллельность раньше ограничивала каждая пачка отдельно, а хост
         // видит их сумму: лента, открытая плитка и два хоста на каждый запрос
@@ -730,12 +844,15 @@
 
         function searchSingle(config, query, callback, errorCallback, requestTimeout) {
             var cacheKey = config.base + '|' + query;
+            var scheme = config.base.indexOf('https://') === 0 ? 'https://' : 'http://';
             var cached = cache[cacheKey];
             if (cached && (nowFn() - cached.ts) < cacheTtl) {
+                log.start('jacred', config.host, scheme, query)('cache', { rows: cached.data.length });
                 return callback(cached.data.slice(), { host: config.host, cached: true });
             }
 
             if (isBlocked(config.host)) {
+                log.start('jacred', config.host, scheme, query)('block');
                 return errorCallback('JacRed(' + config.host + ') отдыхает после серии отказов');
             }
 
@@ -746,9 +863,11 @@
                 // Пока запрос стоял в очереди, хост мог успеть отказать.
                 if (isBlocked(config.host)) {
                     release();
+                    log.start('jacred', config.host, scheme, query)('block');
                     return errorCallback('JacRed(' + config.host + ') отдыхает после серии отказов');
                 }
 
+                var done = log.start('jacred', config.host, scheme, query);
                 var network = createRequest();
                 active.push(network);
                 if (typeof network.timeout === 'function') network.timeout(requestTimeout || timeoutMs);
@@ -757,18 +876,22 @@
                     release();
                     if (!Array.isArray(data)) {
                         noteFailure(config.host);
+                        done('fail', { status: 'ответ не массив' });
                         return errorCallback('JacRed(' + config.host + '): ответ не массив');
                     }
                     noteSuccess(config.host);
                     var normalized = data.map(normalizeJacRedItem);
                     cache[cacheKey] = { data: normalized, ts: nowFn() };
                     prune();
+                    done('ok', { rows: normalized.length });
                     callback(normalized.slice(), { host: config.host, cached: false });
                 }, function (xhr) {
                     removeActive(network);
                     release();
                     noteFailure(config.host);
-                    errorCallback('JacRed(' + config.host + ') недоступен (' + (xhr && xhr.status ? xhr.status : 'нет ответа') + ')');
+                    var status = (xhr && xhr.status) ? xhr.status : 'нет ответа';
+                    done('fail', { status: status });
+                    errorCallback('JacRed(' + config.host + ') недоступен (' + status + ')');
                 });
             });
         }
@@ -835,7 +958,8 @@
 
     var jacRedAccess = createJacRedAccess({
         getConfigs: getJackettConfigs,
-        createRequest: function () { return new Lampa.Reguest(); }
+        createRequest: function () { return new Lampa.Reguest(); },
+        log: requestLog
     });
 
     var FEED_QUERIES = null;
@@ -885,9 +1009,13 @@
         if (!Lampa.Parser || typeof Lampa.Parser.get !== 'function') {
             return errorCallback('Нет Lampa.Parser');
         }
+        var done = requestLog.start('parser', 'lampa', '', query);
         Lampa.Parser.get({ search: query, other: true, from_search: true }, function (json) {
-            callback((json && Array.isArray(json.Results)) ? json.Results : []);
+            var rows = (json && Array.isArray(json.Results)) ? json.Results : [];
+            done('ok', { rows: rows.length });
+            callback(rows);
         }, function (err) {
+            done('fail', { status: String(err || 'ошибка').slice(0, 80) });
             errorCallback(err || 'Lampa.Parser ошибка');
         });
     }
@@ -1473,9 +1601,22 @@
             scroll.append(sectionHeader);
             var feedActions = $('<div class="wrestling-weekly__filters"></div>');
             var refreshFeedBtn = $('<div class="selector wrestling-weekly__filter-btn">Обновить ленту</div>');
+            var diagBtn = $('<div class="selector wrestling-weekly__filter-btn">Диагностика</div>');
             feedActions.append(refreshFeedBtn);
+            feedActions.append(diagBtn);
             trackFocus(refreshFeedBtn);
+            trackFocus(diagBtn);
             scroll.append(feedActions);
+
+            var diagBox = $('<div class="wrestling-weekly__diag"></div>');
+            scroll.append(diagBox);
+            diagBtn.on('hover:enter', function () {
+                if (diagBox.find('div').length) return diagBox.empty();
+                diagnosticsLines().forEach(function (line) {
+                    diagBox.append($('<div></div>').text(line));
+                });
+                refreshController(250, null);
+            });
             var feedContainer = $('<div class="wrestling-weekly__list wrestling-weekly__feed"></div>');
             var feedLoader = $('<div class="wrestling-weekly__loader">Загружаю свежие раздачи...</div>');
             feedContainer.append(feedLoader);
@@ -1878,6 +2019,11 @@
             '.wrestling-weekly__meta{font-size:1em;line-height:1.6}' +
             '.wrestling-weekly__loader{padding:1.5em;font-size:1.1em;opacity:.7}' +
             '.wrestling-weekly__stats{padding:.6em 1em;margin:.4em 0 .8em;font-size:.95em;background:rgba(255,255,255,0.04);border-radius:.5em;opacity:.85}' +
+            // Журнал читают с фотографии телевизора: моноширинный шрифт,
+            // высокий контраст, без переносов внутри строки.
+            '.wrestling-weekly__diag{font-family:monospace;font-size:.95em;line-height:1.45;white-space:pre-wrap;word-break:break-word}' +
+            '.wrestling-weekly__diag>div{padding:.05em 1em}' +
+            '.wrestling-weekly__diag>div:nth-child(odd){background:rgba(255,255,255,0.05)}' +
             '.wrestling-weekly__item{padding:1em;margin-bottom:.5em;background:rgba(255,255,255,0.04);border-radius:.6em}' +
             '.wrestling-weekly__item.focus{background:#fff;color:#000}' +
             '.wrestling-weekly__pill{display:inline-block;margin-right:.6em;padding:.2em .6em;border-radius:.4em;background:rgba(255,255,255,0.08);font-size:.9em}' +
@@ -1933,6 +2079,55 @@
         } catch (e) {}
     }
 
+    function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+    function clockOf(ts) {
+        var d = new Date(ts);
+        return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    }
+
+    // Журнал уезжает ко мне фотографией экрана, поэтому он обязан помещаться
+    // на экран и читаться: сводка крупно, десяток последних строк мелко.
+    function diagnosticsLines() {
+        var s = requestLog.summary();
+        var lines = ['Рестлинг v' + PLUGIN_VERSION + ' · запросов в журнале: ' + s.total];
+
+        var configs = getJackettConfigs();
+        lines.push('Источники: ' + (configs.length
+            ? configs.map(function (c) { return c.base + (c.key ? ' (с ключом)' : ' (без ключа)'); }).join(', ')
+            : 'не заданы'));
+
+        if (!s.total) {
+            lines.push('Журнал пуст — откройте плитку или обновите ленту.');
+            return lines;
+        }
+
+        lines.push('Период: ' + clockOf(s.from) + ' — ' + clockOf(s.to));
+        lines.push('Исходы: ok ' + (s.outcomes.ok || 0) +
+            ' · ошибок ' + (s.outcomes.fail || 0) +
+            ' · из кэша ' + (s.outcomes.cache || 0) +
+            ' · пропущено после отказов ' + (s.outcomes.block || 0));
+
+        s.hosts.forEach(function (h) {
+            lines.push('  ' + h.host + ': ok ' + h.ok + ', ошибок ' + h.fail +
+                ', прочее ' + h.other + ', макс ' + h.maxMs + ' мс');
+        });
+
+        if (s.errors.length) {
+            lines.push('Ошибки:');
+            s.errors.forEach(function (e) { lines.push('  ' + e.count + '× ' + e.text); });
+        }
+        if (s.slowest) lines.push('Дольше всех: ' + s.slowest.ms + ' мс — ' + s.slowest.q);
+
+        lines.push('Последние запросы:');
+        requestLog.entries().slice(-10).forEach(function (r) {
+            lines.push('  ' + clockOf(r.t) + ' ' + r.out + ' ' + r.ms + 'мс ' +
+                (r.out === 'ok' ? r.n + ' строк ' : (r.st ? r.st + ' ' : '')) +
+                r.scheme + r.host + ' « ' + r.q + ' »');
+        });
+        return lines;
+    }
+
     function exposeDebugApi() {
         window.wr = {
             version: PLUGIN_VERSION,
@@ -1946,6 +2141,10 @@
                 jacRedAccess.invalidate();
                 return 'wr feed cache cleared';
             },
+            log: function () { return requestLog.entries(); },
+            logSummary: function () { return requestLog.summary(); },
+            logText: function () { return diagnosticsLines().join('\n'); },
+            clearLog: function () { requestLog.clear(); return 'wr request log cleared'; },
             feedCache: function () {
                 var c = loadFeedFromStorage();
                 if (!c) return null;
@@ -1976,12 +2175,14 @@
             canonicalTorrentKey: canonicalTorrentKey,
             runQueryBatch: runQueryBatch,
             createJacRedAccess: createJacRedAccess,
+            createRequestLog: createRequestLog,
             normalizeJacRedItem: normalizeJacRedItem,
             titleMatchesEvent: titleMatchesEvent,
             filterFeedMatches: filterFeedMatches,
             buildFeedQueries: buildFeedQueries,
             titleNorm: titleNorm,
             JACRED_CACHE_MAX: JACRED_CACHE_MAX,
+            normalizeJackettUrl: normalizeJackettUrl,
             TILE_ADAPTERS: TILE_ADAPTERS,
             FEED_ADAPTERS: FEED_ADAPTERS,
             FEED_SOURCES: FEED_SOURCES,
