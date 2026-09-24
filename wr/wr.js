@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.9.4';
+    var PLUGIN_VERSION = '2.10.1';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -204,6 +204,7 @@
     var JACRED_COOLDOWN_MS = 60000;
     var JACRED_THROTTLE_COOLDOWN_MS = 5 * 60 * 1000;
     var JACRED_THROTTLE_COOLDOWN_MAX_MS = 60 * 60 * 1000;
+    var JACRED_THROTTLE_KEY = 'wrestling_jacred_throttle';
     var JACRED_MIN_SPACING_MS = 400;
     // Шоу без своей плитки. Как и у плиток, отбор идёт по собственным
     // запросам: в заголовке должны быть все слова запроса.
@@ -766,8 +767,18 @@
         var cache = {};
         var active = [];
         var failures = {};
-        var blockedUntil = {};
-        var throttleStrikes = {};
+        // Остывание и счётчик 429 переживают перезапуск приложения: лимит
+        // живёт на сервере, а не у нас, и забывать его при каждом открытии
+        // плагина — значит каждый раз платить новым 429 и продлевать запрет.
+        var readThrottle = deps.readThrottle || function () { return null; };
+        var writeThrottle = deps.writeThrottle || function () {};
+        var restored = readThrottle() || {};
+        var blockedUntil = restored.until || {};
+        var throttleStrikes = restored.strikes || {};
+
+        function persistThrottle() {
+            writeThrottle({ until: blockedUntil, strikes: throttleStrikes });
+        }
         var minSpacingMs = typeof deps.minSpacingMs === 'number' ? deps.minSpacingMs : JACRED_MIN_SPACING_MS;
         var delay = deps.delay || function (ms, fn) { setTimeout(fn, ms); };
         var inflight = 0;
@@ -835,6 +846,7 @@
                 var strikes = throttleStrikes[host] = (throttleStrikes[host] || 0) + 1;
                 var wait = Math.min(throttleCooldownMs * Math.pow(2, strikes - 1), throttleCooldownMaxMs);
                 blockedUntil[host] = nowFn() + wait;
+                persistThrottle();
                 return;
             }
             if (failures[host] >= failureLimit) blockedUntil[host] = nowFn() + cooldownMs;
@@ -842,8 +854,20 @@
 
         function noteSuccess(host) {
             failures[host] = 0;
-            throttleStrikes[host] = 0;
-            delete blockedUntil[host];
+            if (throttleStrikes[host] || blockedUntil[host]) {
+                throttleStrikes[host] = 0;
+                delete blockedUntil[host];
+                persistThrottle();
+            }
+        }
+
+        // Ручной сброс нужен ровно в одном случае: условия доступа изменились
+        // (появился ключ, сменился адрес), и ждать старое остывание незачем.
+        function clearThrottle() {
+            blockedUntil = {};
+            throttleStrikes = {};
+            failures = {};
+            persistThrottle();
         }
 
         function cooldowns() {
@@ -1022,6 +1046,7 @@
             abortActive: abortActive,
             throttled: throttled,
             cooldowns: cooldowns,
+            clearThrottle: clearThrottle,
             cacheSize: cacheSize,
             activeCount: activeCount
         };
@@ -1030,7 +1055,13 @@
     var jacRedAccess = createJacRedAccess({
         getConfigs: getJackettConfigs,
         createRequest: function () { return new Lampa.Reguest(); },
-        log: requestLog
+        log: requestLog,
+        readThrottle: function () {
+            try { return Lampa.Storage.get(JACRED_THROTTLE_KEY, null); } catch (e) { return null; }
+        },
+        writeThrottle: function (state) {
+            try { Lampa.Storage.set(JACRED_THROTTLE_KEY, state); } catch (e) {}
+        }
     });
 
     // Еженедельные шоу выходят каждую неделю — их спрашиваем всегда. Имена
@@ -1042,9 +1073,9 @@
     var FEED_CORE_EXTRA_QUERIES = [
         'WWE NXT', 'WWE Main Event', 'AEW Rampage', 'ROH Wrestling', 'TNA Xplosion'
     ];
-    // До объединения правил лента обходилась 24 запросами и лимитов не ловила.
-    // Держимся этого порядка: ядро 23 плюс небольшой срез хвоста. Полный круг
-    // по именам PPV занимает больше проходов, но окно ленты — 14 дней.
+    // Версия 2.3.3 работала месяцами на 45 запросах в ленте. Держимся ниже
+    // этой планки: ядро плюс небольшой срез хвоста. Полный круг по именам PPV
+    // занимает больше проходов, но окно ленты — 14 дней, никто не теряется.
     var FEED_TAIL_PER_PASS = 4;
     var FEED_ROTATION_KEY = 'wrestling_feed_rotation';
 
@@ -1077,16 +1108,40 @@
         return dedupe(all).filter(function (q) { return !core[q]; });
     }
 
+    function weeklyQueries() {
+        var list = [];
+        WEEKLY.forEach(function (ev) { list = list.concat(ev.queries); });
+        return dedupe(list);
+    }
+
+    // План ленты — три ступени, а не один список. Первая ступень это пять
+    // еженедельных шоу: ради них лента и открывается, и они обязаны приехать
+    // с первых же запросов. Следующие ступени идут, только если предыдущая
+    // отработала без отказов — иначе на скудном источнике мы сожжём остаток
+    // лимита на имена PPV и не покажем даже RAW.
     function feedQueryPlan(offset) {
-        var core = feedCoreQueries();
+        var weekly = weeklyQueries();
+        var inWeekly = {};
+        weekly.forEach(function (q) { inWeekly[q] = 1; });
+        var rest = feedCoreQueries().filter(function (q) { return !inWeekly[q]; });
         var tail = feedTailQueries();
-        if (!tail.length) return { queries: core, tailFrom: 0, tailTotal: 0 };
-        var from = ((offset || 0) % tail.length + tail.length) % tail.length;
+
         var slice = [];
-        for (var i = 0; i < Math.min(FEED_TAIL_PER_PASS, tail.length); i++) {
-            slice.push(tail[(from + i) % tail.length]);
+        var from = 0;
+        if (tail.length) {
+            from = ((offset || 0) % tail.length + tail.length) % tail.length;
+            for (var i = 0; i < Math.min(FEED_TAIL_PER_PASS, tail.length); i++) {
+                slice.push(tail[(from + i) % tail.length]);
+            }
         }
-        return { queries: core.concat(slice), tailFrom: from, tailTotal: tail.length };
+
+        var stages = [weekly, rest, slice].filter(function (s) { return s.length; });
+        return {
+            stages: stages,
+            queries: weekly.concat(rest, slice),
+            tailFrom: from,
+            tailTotal: tail.length
+        };
     }
 
     function nextFeedRotation() {
@@ -1317,11 +1372,17 @@
         }
     };
 
-    // Лента — объединение плиток, значит и ходить она обязана туда же.
-    // Пока у ленты был только JacRed, упавший JacRed выносил ленту целиком,
-    // а плитки продолжали жить на фолбэке — рестлинг «пропадал» только в ленте.
+    // Плитка открывается по одной и руками — второй заход после отказа стоит
+    // одного запроса и иногда спасает. Так было и в рабочей версии 2.3.3.
     var TILE_ADAPTERS = [JACRED_SEARCH_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER];
-    var FEED_ADAPTERS = [JACRED_FEED_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER];
+    var BULK_TILE_ADAPTERS = [JACRED_FEED_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER];
+
+    // Лента ходит только в JacRed — ровно как 2.3.3, которая работала месяцами.
+    // Lampa.Parser читает тот же jackett_url, то есть вторым источником никогда
+    // не был. Зато в ленте он удваивал обход: десятки отказов превращались в
+    // десятки повторов по тому же адресу, и временный отказ хоста закреплялся
+    // надолго. Пусть лучше упавший запрос останется упавшим.
+    var FEED_ADAPTERS = [JACRED_FEED_ADAPTER];
 
     function loadRecentFeed(callback, opts) {
         opts = opts || {};
@@ -1333,33 +1394,73 @@
         var lastPartialCount = 0;
 
         var plan = feedQueryPlan(nextFeedRotation());
-        requestLog.who('лента ' + plan.queries.length + '/' + (feedCoreQueries().length + plan.tailTotal) +
-            ' хвост ' + plan.tailFrom);
+        var planned = plan.queries.length;
+        var rows = [];
+        var done = 0;
+        var failed = 0;
 
-        runQueryBatch({
-            queries: plan.queries,
-            adapters: FEED_ADAPTERS,
-            concurrency: concurrency,
-            isCancelled: isCancelled,
-            allowAllFailedAsEmpty: true,
-            onProgress: function (batch) {
-                if (!onPartial || isCancelled()) return;
-                var now = Date.now();
-                // UI policy: redraw at most once per 350 ms. The orchestrator
-                // still reports a snapshot after every completed query.
-                if (!batch.progress.final && now - lastPartialAt < 350) return;
-                var matches = filterFeedMatches(batch.rows);
-                if (!batch.progress.final && matches.length === lastPartialCount) return;
-                lastPartialAt = now;
-                lastPartialCount = matches.length;
-                onPartial(matches, batch.progress);
+        function snapshot(final) {
+            return { finished: done, total: planned, failed: failed, final: !!final };
+        }
+
+        function report(final) {
+            if (!onPartial || isCancelled()) return;
+            var now = Date.now();
+            // UI policy: redraw at most once per 350 ms. The orchestrator
+            // still reports a snapshot after every completed query.
+            if (!final && now - lastPartialAt < 350) return;
+            var matches = filterFeedMatches(rows);
+            if (!final && matches.length === lastPartialCount) return;
+            lastPartialAt = now;
+            lastPartialCount = matches.length;
+            onPartial(matches, snapshot(final));
+        }
+
+        function runStage(ix) {
+            if (isCancelled()) return;
+            // Ступень не пошла — значит источник скуден. Оставшиеся запросы
+            // отдадут те же отказы и только продлят лимит, поэтому
+            // останавливаемся на том, что уже добыли.
+            if (ix >= plan.stages.length || (ix > 0 && failed)) {
+                planned = done;
+                return callback(filterFeedMatches(rows), snapshot(true));
             }
-        }, function (batch) {
-            if (!isCancelled()) callback(filterFeedMatches(batch.rows), batch.progress);
-        }, function () {
-            // allowAllFailedAsEmpty keeps the historical feed behavior.
-            if (!isCancelled()) callback([], null);
-        });
+
+            var stage = plan.stages[ix];
+            requestLog.who('лента ступень ' + (ix + 1) + '/' + plan.stages.length +
+                ' (' + stage.length + ' зпр)');
+
+            runQueryBatch({
+                queries: stage,
+                adapters: FEED_ADAPTERS,
+                concurrency: concurrency,
+                isCancelled: isCancelled,
+                allowAllFailedAsEmpty: true,
+                onProgress: function (batch) {
+                    done = doneBefore + batch.progress.finished;
+                    failed = failedBefore + batch.progress.failed;
+                    if (!batch.progress.final) report(false);
+                }
+            }, function (batch) {
+                rows = rows.concat(batch.rows);
+                done = doneBefore + batch.progress.finished;
+                failed = failedBefore + batch.progress.failed;
+                doneBefore = done;
+                failedBefore = failed;
+                report(false);
+                runStage(ix + 1);
+            }, function () {
+                failed = failedBefore + stage.length;
+                done = doneBefore + stage.length;
+                doneBefore = done;
+                failedBefore = failed;
+                if (!isCancelled()) callback(filterFeedMatches(rows), snapshot(true));
+            });
+        }
+
+        var doneBefore = 0;
+        var failedBefore = 0;
+        runStage(0);
     }
 
     function searchTorrents(event, callback, errorCallback) {
@@ -1371,7 +1472,7 @@
         requestLog.who('плитка ' + (event.id || event.title || '?'));
         runQueryBatch({
             queries: event.queries,
-            adapters: bulk ? FEED_ADAPTERS : TILE_ADAPTERS,
+            adapters: bulk ? BULK_TILE_ADAPTERS : TILE_ADAPTERS,
             concurrency: EVENT_QUERY_CONCURRENCY
         }, function (batch) {
             callback(batch.rows, {
@@ -2300,6 +2401,11 @@
                 clearFeedFailure();
                 jacRedAccess.invalidate();
                 return 'wr feed cache cleared';
+            },
+            clearThrottle: function () {
+                jacRedAccess.clearThrottle();
+                clearFeedFailure();
+                return 'wr throttle cleared';
             },
             log: function () { return requestLog.entries(); },
             logSummary: function () { return requestLog.summary(); },
