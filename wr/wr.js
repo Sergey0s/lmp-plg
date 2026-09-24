@@ -8,7 +8,7 @@
     window.wrestling_weekly_plugin = true;
 
     var PLUGIN_ID = 'wrestling_weekly';
-    var PLUGIN_VERSION = '2.10.1';
+    var PLUGIN_VERSION = '2.10.2';
     var PLUGIN_NAME = 'Рестлинг';
     var COMPONENT_NAME = 'wrestling_weekly';
     var PLUGIN_AUTHOR_LABEL = 'github.com/Sergey0s';
@@ -196,14 +196,20 @@
     // PPV-агрегатор теперь делает 20+ запросов — concurrency 4 даёт разумный
     // компромисс между скоростью и нагрузкой на Jackett/роутер.
     var EVENT_QUERY_CONCURRENCY = 4;
-    var JACRED_REQUEST_TIMEOUT_MS = 10000;
-    var FEED_REQUEST_TIMEOUT_MS = 30000;
+    // Живой JacRed отвечает за секунду-две. Всё, что тянется дольше, почти
+    // всегда не ответит вовсе, а мы держим соединение и заставляем ждать.
+    // Лучше быстро признать отказ и показать то, что уже нашлось.
+    var JACRED_REQUEST_TIMEOUT_MS = 7000;
+    var FEED_REQUEST_TIMEOUT_MS = 12000;
     var BULK_QUERY_THRESHOLD = 4;
     var JACRED_MAX_INFLIGHT = 3;
     var JACRED_FAILURE_LIMIT = 4;
     var JACRED_COOLDOWN_MS = 60000;
-    var JACRED_THROTTLE_COOLDOWN_MS = 5 * 60 * 1000;
-    var JACRED_THROTTLE_COOLDOWN_MAX_MS = 60 * 60 * 1000;
+    // Пауза после 429 нужна, чтобы не долбить хост, но она наказывает и нас:
+    // пока она висит, плагин пуст. Минуты хватает, чтобы разорвать серию,
+    // а час превращал временный отказ в мёртвый вечер.
+    var JACRED_THROTTLE_COOLDOWN_MS = 60 * 1000;
+    var JACRED_THROTTLE_COOLDOWN_MAX_MS = 10 * 60 * 1000;
     var JACRED_THROTTLE_KEY = 'wrestling_jacred_throttle';
     var JACRED_MIN_SPACING_MS = 400;
     // Шоу без своей плитки. Как и у плиток, отбор идёт по собственным
@@ -926,7 +932,7 @@
             active = [];
         }
 
-        function searchSingle(config, query, callback, errorCallback, requestTimeout) {
+        function searchSingle(config, query, callback, errorCallback, requestTimeout, bypassThrottle) {
             var cacheKey = config.base + '|' + query;
             var scheme = config.base.indexOf('https://') === 0 ? 'https://' : 'http://';
             var cached = cache[cacheKey];
@@ -935,7 +941,12 @@
                 return callback(cached.data.slice(), { host: config.host, cached: true });
             }
 
-            if (isBlocked(config.host)) {
+            // Пауза придумана против массового обхода. Плитка, открытая руками,
+            // это один-три запроса: запрещать их — значит показывать человеку
+            // мёртвый плагин там, где хост наверняка бы ответил.
+            function blocked() { return !bypassThrottle && isBlocked(config.host); }
+
+            if (blocked()) {
                 log.start('jacred', config.host, scheme, query)('block');
                 return errorCallback('JacRed(' + config.host + ') отдыхает после серии отказов');
             }
@@ -945,7 +956,7 @@
 
             schedule(function () {
                 // Пока запрос стоял в очереди, хост мог успеть отказать.
-                if (isBlocked(config.host)) {
+                if (blocked()) {
                     release();
                     log.start('jacred', config.host, scheme, query)('block');
                     return errorCallback('JacRed(' + config.host + ') отдыхает после серии отказов');
@@ -986,6 +997,7 @@
             if (!configs.length) return errorCallback('jackett_url не задан в Lampa');
 
             var requestTimeout = opts && opts.timeoutMs;
+            var bypassThrottle = !!(opts && opts.bypassThrottle);
 
             var pending = configs.length;
             var all = [];
@@ -1026,7 +1038,7 @@
                         firstError = firstError || err;
                         sourceStats.push({ host: cfg.host, count: 0, ok: false, error: err });
                         done();
-                    }, requestTimeout);
+                    }, requestTimeout, bypassThrottle);
                 })(configs[i]);
             }
         }
@@ -1198,13 +1210,9 @@
         if (!Lampa.Parser || typeof Lampa.Parser.get !== 'function') {
             return errorCallback('Нет Lampa.Parser');
         }
-        // Lampa.Parser — не независимый источник: он настроен на тот же
-        // jackett_url. Пока хост просит нас подождать, запасной путь ведёт
-        // ровно туда же и только удваивает стук.
-        if (jacRedAccess.throttled()) {
-            requestLog.start('parser', 'lampa', '', query)('block');
-            return errorCallback('Источник просит подождать — запасной путь ведёт туда же');
-        }
+        // Lampa.Parser читает тот же jackett_url, поэтому в ленте его нет —
+        // там он лишь удваивал стук. Здесь он остаётся: плитку открывает
+        // человек, и один повтор стоит одного запроса.
         var done = requestLog.start('parser', 'lampa', '', query);
         Lampa.Parser.get({ search: query, other: true, from_search: true }, function (json) {
             var rows = (json && Array.isArray(json.Results)) ? json.Results : [];
@@ -1353,17 +1361,20 @@
     // Лента читает 82 запроса подряд, ответы JacRed по 60-300 КБ, и на телевизоре
     // широкие запросы («WWE Raw», «AEW Collision») не укладываются в плиточные
     // 10 с. Выживали только самые лёгкие — отсюда «осталось два результата».
-    function makeJacRedAdapter(requestTimeout) {
+    function makeJacRedAdapter(requestTimeout, bypassThrottle) {
         return {
             id: 'jacred',
             search: function (query, callback, errorCallback) {
-                jacRedAccess.search(query, callback, errorCallback, { timeoutMs: requestTimeout });
+                jacRedAccess.search(query, callback, errorCallback, {
+                    timeoutMs: requestTimeout,
+                    bypassThrottle: bypassThrottle
+                });
             }
         };
     }
 
-    var JACRED_SEARCH_ADAPTER = makeJacRedAdapter(JACRED_REQUEST_TIMEOUT_MS);
-    var JACRED_FEED_ADAPTER = makeJacRedAdapter(FEED_REQUEST_TIMEOUT_MS);
+    var JACRED_SEARCH_ADAPTER = makeJacRedAdapter(JACRED_REQUEST_TIMEOUT_MS, true);
+    var JACRED_FEED_ADAPTER = makeJacRedAdapter(FEED_REQUEST_TIMEOUT_MS, false);
 
     var LAMPA_PARSER_SEARCH_ADAPTER = {
         id: 'lampa_parser',
@@ -1375,7 +1386,9 @@
     // Плитка открывается по одной и руками — второй заход после отказа стоит
     // одного запроса и иногда спасает. Так было и в рабочей версии 2.3.3.
     var TILE_ADAPTERS = [JACRED_SEARCH_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER];
-    var BULK_TILE_ADAPTERS = [JACRED_FEED_ADAPTER, LAMPA_PARSER_SEARCH_ADAPTER];
+    // Плитка PPV — тоже обход, но запускает его человек осознанно. Пауза
+    // существует против фонового автозапуска, а не против явного действия.
+    var BULK_TILE_ADAPTERS = [makeJacRedAdapter(FEED_REQUEST_TIMEOUT_MS, true), LAMPA_PARSER_SEARCH_ADAPTER];
 
     // Лента ходит только в JacRed — ровно как 2.3.3, которая работала месяцами.
     // Lampa.Parser читает тот же jackett_url, то есть вторым источником никогда
@@ -1964,6 +1977,10 @@
                 var nonce = ++feedNonce;
                 if (forceRefresh) {
                     jacRedAccess.invalidate();
+                    // Нажатие на «Обновить» — это «попробуй прямо сейчас».
+                    // Держать после него собственную паузу значит не оставить
+                    // человеку вообще никакого выхода из тишины.
+                    jacRedAccess.clearThrottle();
                     clearFeedStorage();
                     clearFeedFailure();
                     if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Лента: кэш очищен, обновляю…');
@@ -1985,11 +2002,11 @@
                 // Автозапуск на главной не имеет права ломиться в источник,
                 // который только что отказал всем: кнопка «Обновить ленту»
                 // остаётся, а сам вход в плагин больше не стоит обхода.
-                if (!forceRefresh && feedRetryBlocked()) {
+                if (!forceRefresh && (feedRetryBlocked() || jacRedAccess.throttled())) {
                     if (!cached || !cached.matches.length) {
                         feedContainer.empty();
-                        feedContainer.append($('<div class="empty"><div class="empty__title">Источники недавно не ответили. Нажмите «Обновить ленту», чтобы попробовать снова</div></div>'));
-                        setCountLabel('· пауза после отказа');
+                        feedContainer.append($('<div class="empty"><div class="empty__title">Источник попросил паузу. Нажмите «Обновить ленту» — пауза снимется и запросы уйдут сразу</div></div>'));
+                        setCountLabel('· пауза, снимается кнопкой');
                     }
                     return;
                 }
@@ -2451,6 +2468,7 @@
             FEED_TAIL_PER_PASS: FEED_TAIL_PER_PASS,
             titleNorm: titleNorm,
             JACRED_CACHE_MAX: JACRED_CACHE_MAX,
+            JACRED_REQUEST_TIMEOUT_MS: JACRED_REQUEST_TIMEOUT_MS,
             normalizeJackettUrl: normalizeJackettUrl,
             TILE_ADAPTERS: TILE_ADAPTERS,
             FEED_ADAPTERS: FEED_ADAPTERS,
